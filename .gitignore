@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+data/
+site/
+PERSONA.md
+MANDATE.md
+journal/*.jsonl
+!journal/.gitkeep
+
+docs/consent/

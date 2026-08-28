@@ -1,0 +1,13 @@
+{
+  "source": "TRADING212",
+  "observed_at": "REPLACE_WITH_CURRENT_UTC_TIMESTAMP",
+  "cash_gbp": "100.00",
+  "positions": [
+    {
+      "ticker": "REPLACE_WITH_EXACT_T212_TICKER",
+      "quantity": "0.0000",
+      "market_value_gbp": "0.00"
+    }
+  ]
+}
+

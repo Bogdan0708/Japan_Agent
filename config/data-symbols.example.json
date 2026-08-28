@@ -1,0 +1,6 @@
+{
+  "_comment": "Map exact verified T212 whitelist tickers to yfinance symbols. Copy to data-symbols.json after verifying the whitelist. FX pairs are derived automatically (USDGBP=X etc.).",
+  "symbols": {
+    "EXAMPLE_T212_TICKER_EQ": "RBOT.L"
+  }
+}

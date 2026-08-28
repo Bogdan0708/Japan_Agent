@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "japan-tech-analyst"
+version = "0.1.0"
+description = "Human-approved, paper-first Japan technology investment research agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Bogdan and the Japan Tech Analyst"}]
+dependencies = []
+
+[project.optional-dependencies]
+research = ["claude-agent-sdk>=0.1.0"]
+data = ["yfinance>=0.2.0"]
+dev = ["pytest>=8.0", "ruff>=0.9", "mypy>=1.14"]
+
+[project.scripts]
+japan-agent = "japan_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["japan_agent"]
+

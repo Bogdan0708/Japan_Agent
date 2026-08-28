@@ -1,0 +1,14 @@
+{
+  "generated_at": "2026-08-28T07:00:00Z",
+  "items": [
+    {
+      "external_id": "source-stable-id",
+      "headline": "Replace with a faithfully summarized disclosure or news headline",
+      "published_at": "2026-08-28T05:30:00Z",
+      "url": "https://example.invalid/primary-source",
+      "ticker": "OPTIONAL_EXACT_TICKER",
+      "summary": "Derived summary; do not paste licensed raw datasets."
+    }
+  ]
+}
+

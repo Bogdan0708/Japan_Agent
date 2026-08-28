@@ -1,0 +1,20 @@
+{
+  "week_ending": "2026-08-30",
+  "agent_name": "REPLACE_AFTER_FIRST_BOOT",
+  "start_nav_gbp": "100.00",
+  "end_nav_gbp": "100.00",
+  "cash_flows_gbp": "0.00",
+  "benchmark_returns": {
+    "MSCI Japan proxy": "0.0000",
+    "RBOT": "0.0000"
+  },
+  "decisions": [
+    {
+      "action": "HOLD",
+      "ticker": "REPLACE_WITH_EXACT_TICKER",
+      "thesis": "Replace with the public, sourced thesis.",
+      "outcome": "No proposal",
+      "invalidation_condition": "Replace with the recorded condition."
+    }
+  ]
+}

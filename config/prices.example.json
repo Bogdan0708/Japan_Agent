@@ -1,0 +1,20 @@
+{
+  "prices": [
+    {
+      "ticker": "REPLACE_WITH_VERIFIED_LSE_TICKER",
+      "native_price": "523.50",
+      "native_currency": "GBX",
+      "observed_at": "2026-08-28T10:15:00Z",
+      "source": "yfinance-daily-or-intraday"
+    },
+    {
+      "ticker": "REPLACE_WITH_VERIFIED_US_TICKER",
+      "native_price": "30.00",
+      "native_currency": "USD",
+      "gbp_per_native_unit": "0.750000",
+      "observed_at": "2026-08-28T15:15:00Z",
+      "source": "yfinance-plus-timestamp-matched-fx"
+    }
+  ]
+}
+

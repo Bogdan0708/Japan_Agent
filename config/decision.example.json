@@ -1,0 +1,13 @@
+{
+  "thesis": "Replace with a sourced, falsifiable thesis.",
+  "evidence": [
+    "Replace with timestamped primary-source evidence.",
+    "Replace with an independent corroborating observation."
+  ],
+  "action": "HOLD",
+  "instrument": "REPLACE_WITH_EXACT_T212_TICKER",
+  "target_weight": "0.00",
+  "confidence": "0.50",
+  "invalidation_condition": "Replace with a measurable condition."
+}
+
