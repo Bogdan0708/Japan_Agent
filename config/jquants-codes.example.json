@@ -1,0 +1,6 @@
+{
+  "_comment": "Optional weekly J-Quants historical-context refresh. Map a label to the JPX security code of the Japanese company underlying each whitelisted instrument (e.g. Sony 6758, Keyence 6861). Copy to jquants-codes.json to enable; free-plan data is 12 weeks delayed and is historical context only.",
+  "codes": {
+    "sony": "6758"
+  }
+}

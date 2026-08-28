@@ -26,10 +26,13 @@ class TelegramPoller:
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.channel = channel
+        self.uses_api_fetch = fetch is None
         self.fetch = fetch or self._fetch_via_api
         self.sleep = sleep
 
     def _fetch_via_api(self, offset: int, timeout: int) -> list[dict[str, Any]]:
+        # The HTTP client must outlive Telegram's server-side long-poll wait,
+        # otherwise every getUpdates times out locally before it can answer.
         result = self.channel._post(
             "/getUpdates",
             {
@@ -37,6 +40,7 @@ class TelegramPoller:
                 "timeout": str(timeout),
                 "allowed_updates": '["callback_query"]',
             },
+            timeout=timeout + 10,
         )
         updates = result.get("result", [])
         return updates if isinstance(updates, list) else []
@@ -69,6 +73,15 @@ class TelegramPoller:
         return offset, handled
 
     def poll_forever(self, *, timeout: int = 50, retry_delay: float = 10.0) -> None:
+        if self.uses_api_fetch:
+            # Telegram refuses getUpdates while a webhook is registered.
+            try:
+                self.channel._post("/deleteWebhook", {})
+            except (RuntimeError, OSError):
+                print(
+                    "deleteWebhook failed; getUpdates may conflict with an active webhook",
+                    file=sys.stderr,
+                )
         offset = 0
         while True:
             try:

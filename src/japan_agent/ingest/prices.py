@@ -11,6 +11,19 @@ from ..storage import Database
 from ..time import parse_datetime
 
 
+def normalize_currency_code(raw: str) -> str:
+    """Canonicalize a vendor currency code, preserving the pounds/pence distinction.
+
+    Yahoo spells London pence "GBp"; letter case is the ONLY thing separating it
+    from pounds, so pence spellings must be matched before any uppercasing.
+    Treating 850 pence as £850 would be a silent 100x pricing error.
+    """
+    value = raw.strip()
+    if value in {"GBp", "GBx"} or value.upper() in {"GBX", "GBPENCE"}:
+        return "GBX"
+    return value.upper()
+
+
 def normalize_price_gbp(
     native_price: Decimal,
     native_currency: str,
@@ -19,16 +32,16 @@ def normalize_price_gbp(
 ) -> Decimal:
     """Normalize quote currency units to pounds.
 
-    LSE frequently reports GBX (pence), which must be divided by 100. Foreign
-    currencies require an explicit timestamp-matched GBP conversion; silently
-    treating USD or JPY as GBP is forbidden.
+    LSE frequently reports pence (GBX / Yahoo's "GBp"), which must be divided by
+    100. Foreign currencies require an explicit timestamp-matched GBP conversion;
+    silently treating USD or JPY as GBP is forbidden.
     """
-    currency = native_currency.upper()
+    currency = normalize_currency_code(native_currency)
     if native_price <= 0:
         raise ValueError("native price must be positive")
     if currency == "GBP":
         return native_price
-    if currency in {"GBX", "GBPENCE"}:
+    if currency == "GBX":
         return native_price / Decimal("100")
     if gbp_per_native_unit is None or gbp_per_native_unit <= 0:
         raise ValueError(f"a positive GBP conversion is required for {native_currency}")
@@ -60,7 +73,7 @@ class NormalizedPriceImporter:
 
     def import_item(self, item: dict[str, Any]) -> PriceSnapshot:
         native_price = decimal(item["native_price"])
-        native_currency = str(item["native_currency"]).upper()
+        native_currency = normalize_currency_code(str(item["native_currency"]))
         conversion = (
             decimal(item["gbp_per_native_unit"])
             if item.get("gbp_per_native_unit") is not None
@@ -106,7 +119,7 @@ class YFinanceDailySource:
         timestamp = history.dropna(subset=["Close"]).index[-1].to_pydatetime()
         if timestamp.tzinfo is None:
             raise RuntimeError("upstream market timestamp lacks timezone information")
-        currency = str(ticker.fast_info.get("currency") or "").upper()
-        if not currency:
+        raw_currency = str(ticker.fast_info.get("currency") or "")
+        if not raw_currency:
             raise RuntimeError("upstream quote currency is missing")
-        return decimal(row["Close"]), currency, timestamp
+        return decimal(row["Close"]), normalize_currency_code(raw_currency), timestamp

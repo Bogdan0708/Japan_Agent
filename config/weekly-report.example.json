@@ -3,10 +3,12 @@
   "agent_name": "REPLACE_AFTER_FIRST_BOOT",
   "start_nav_gbp": "100.00",
   "end_nav_gbp": "100.00",
-  "cash_flows_gbp": "0.00",
+  "cash_flows": [
+    {"date": "2026-08-26", "amount_gbp": "0.00"}
+  ],
   "benchmark_returns": {
-    "MSCI Japan proxy": "0.0000",
-    "RBOT": "0.0000"
+    "MSCI Japan GBP total return": "0.0000",
+    "RBOT GBP total return": "0.0000"
   },
   "decisions": [
     {

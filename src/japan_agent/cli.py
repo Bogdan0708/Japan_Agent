@@ -325,13 +325,17 @@ def command_weekly_post(args: argparse.Namespace) -> None:
     benchmarks = {
         str(name): decimal(value) for name, value in report.get("benchmark_returns", {}).items()
     }
+    cash_flows = [
+        (date.fromisoformat(str(item["date"])), decimal(item["amount_gbp"]))
+        for item in report.get("cash_flows", [])
+    ]
     path = write_weekly_post(
         output_dir=settings.root / "pages" / "_posts",
         week_ending=date.fromisoformat(str(report["week_ending"])),
         agent_name=str(report["agent_name"]),
         start_nav_gbp=decimal(report["start_nav_gbp"]),
         end_nav_gbp=decimal(report["end_nav_gbp"]),
-        cash_flows_gbp=decimal(report.get("cash_flows_gbp", "0")),
+        cash_flows=cash_flows,
         decisions=report.get("decisions", []),
         benchmark_returns=benchmarks,
     )
@@ -351,6 +355,12 @@ def command_killswitch(args: argparse.Namespace) -> None:
         if settings.killswitch_path.exists():
             settings.killswitch_path.unlink()
         print("kill switch disengaged locally; broker credentials were not changed")
+
+
+def command_verify_chain(args: argparse.Namespace) -> None:
+    settings = _settings(_root(args.root))
+    count = _database(settings).verify_event_chain()
+    print(f"event ledger intact: {count} events verified")
 
 
 def command_status(args: argparse.Namespace) -> None:
@@ -373,12 +383,40 @@ def command_status(args: argparse.Namespace) -> None:
 
 def command_doctor(args: argparse.Namespace) -> None:
     settings = _settings(_root(args.root))
+    whitelist = settings.load_whitelist()
+    try:
+        data_symbols = load_data_symbols(settings.root / "config" / "data-symbols.json")
+    except (OSError, ValueError):
+        data_symbols = {}
+    env_path = settings.root / ".env"
+    env_mode_strict = env_path.is_file() and (env_path.stat().st_mode & 0o077) == 0
+    try:
+        _database(settings).verify_event_chain()
+        chain_intact = True
+    except ValueError:
+        chain_intact = False
     checks = {
         "database_parent_writable": os.access(settings.database_path.parent, os.W_OK),
-        "whitelist_verified_nonempty": bool(settings.load_whitelist()),
+        "whitelist_verified_nonempty": bool(whitelist),
+        "data_symbols_cover_whitelist": bool(whitelist)
+        and all(ticker in data_symbols for ticker in whitelist),
         "persona_exists": (settings.root / "PERSONA.md").is_file(),
         "mandate_exists": (settings.root / "MANDATE.md").is_file(),
         "t212_credentials_present": bool(settings.t212_api_key and settings.t212_api_secret),
+        "telegram_settings_present": all(
+            (
+                settings.telegram_bot_token,
+                settings.telegram_approver_user_id,
+                settings.telegram_approval_chat_id,
+                settings.telegram_webhook_secret,
+            )
+        ),
+        "anthropic_key_present": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "research_source_keys_present": bool(
+            settings.jquants_api_key and settings.edinet_api_key
+        ),
+        "env_file_permissions_strict": env_mode_strict,
+        "event_chain_intact": chain_intact,
         "killswitch_clear": not settings.killswitch_path.exists(),
     }
     if settings.t212_environment == "live":
@@ -491,6 +529,9 @@ def build_parser() -> argparse.ArgumentParser:
     killswitch.add_argument("action", choices=["engage", "disengage"])
     killswitch.set_defaults(func=command_killswitch)
 
+    subparsers.add_parser(
+        "verify-chain", help="recompute and verify the hash-chained event ledger"
+    ).set_defaults(func=command_verify_chain)
     subparsers.add_parser("status", help="show local state").set_defaults(func=command_status)
     subparsers.add_parser("doctor", help="fail closed on incomplete setup").set_defaults(
         func=command_doctor

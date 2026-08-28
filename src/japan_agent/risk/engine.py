@@ -157,7 +157,7 @@ class ProposalBuilder:
                 )
             )
         absolute_cap = instrument.max_position_gbp
-        if absolute_cap is None and instrument.sleeve is Sleeve.SATELLITE:
+        if absolute_cap is None and instrument.sleeve in {Sleeve.SATELLITE, Sleeve.FRONTIER}:
             absolute_cap = self.policy.satellite_max_gbp
         if absolute_cap is not None and projected_value > absolute_cap:
             violations.append(
@@ -251,7 +251,7 @@ class ProposalBuilder:
                     RiskViolation("POSITION_LIMIT", "fresh portfolio would breach the NAV cap")
                 )
             absolute_cap = instrument.max_position_gbp
-            if absolute_cap is None and instrument.sleeve is Sleeve.SATELLITE:
+            if absolute_cap is None and instrument.sleeve in {Sleeve.SATELLITE, Sleeve.FRONTIER}:
                 absolute_cap = self.policy.satellite_max_gbp
             if absolute_cap is not None and projected > absolute_cap:
                 violations.append(

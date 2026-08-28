@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,6 +18,37 @@ def performance_return(start_value: Decimal, end_value: Decimal) -> Decimal:
     return (end_value - start_value) / start_value
 
 
+def modified_dietz_return(
+    *,
+    start_nav: Decimal,
+    end_nav: Decimal,
+    flows: list[tuple[date, Decimal]],
+    period_start: date,
+    period_end: date,
+) -> Decimal:
+    """Modified Dietz return: flows are day-weighted by time remaining in the period.
+
+    Subtracting all flows from ending NAV misstates the return whenever a flow
+    lands mid-period; this is the GIPS-aligned approximation of a time-weighted
+    return for a small portfolio without daily valuations.
+    """
+    period_days = (period_end - period_start).days
+    if period_days <= 0:
+        raise ValueError("period must span at least one day")
+    net_flows = Decimal("0")
+    weighted_flows = Decimal("0")
+    for flow_date, amount in flows:
+        if not period_start <= flow_date <= period_end:
+            raise ValueError(f"cash flow on {flow_date} is outside the reporting period")
+        weight = Decimal((period_end - flow_date).days) / Decimal(period_days)
+        net_flows += amount
+        weighted_flows += amount * weight
+    denominator = start_nav + weighted_flows
+    if denominator <= 0:
+        raise ValueError("denominator must be positive for a meaningful return")
+    return (end_nav - start_nav - net_flows) / denominator
+
+
 def write_weekly_post(
     *,
     output_dir: Path,
@@ -25,12 +56,19 @@ def write_weekly_post(
     agent_name: str,
     start_nav_gbp: Decimal,
     end_nav_gbp: Decimal,
-    cash_flows_gbp: Decimal,
+    cash_flows: list[tuple[date, Decimal]],
     decisions: Iterable[dict[str, Any]],
     benchmark_returns: dict[str, Decimal],
 ) -> Path:
-    adjusted_end = end_nav_gbp - cash_flows_gbp
-    portfolio_return = performance_return(start_nav_gbp, adjusted_end)
+    period_start = week_ending - timedelta(days=6)
+    portfolio_return = modified_dietz_return(
+        start_nav=start_nav_gbp,
+        end_nav=end_nav_gbp,
+        flows=cash_flows,
+        period_start=period_start,
+        period_end=week_ending,
+    )
+    net_flows = sum((amount for _, amount in cash_flows), Decimal("0"))
     lines = [
         "---",
         f'title: "Week ending {week_ending.isoformat()}"',
@@ -45,8 +83,8 @@ def write_weekly_post(
         "",
         f"- Start NAV: £{start_nav_gbp:.2f}",
         f"- End NAV: £{end_nav_gbp:.2f}",
-        f"- External cash flows: £{cash_flows_gbp:.2f}",
-        f"- Cash-flow-adjusted simple return for the week: {portfolio_return:.2%}",
+        f"- Net external cash flows: £{net_flows:.2f}",
+        f"- Modified Dietz return for the week: {portfolio_return:.2%}",
     ]
     for name, value in sorted(benchmark_returns.items()):
         lines.append(f"- {name}: {value:.2%}")
@@ -71,8 +109,10 @@ def write_weekly_post(
         [
             "## Method note",
             "",
-            "Returns exclude recorded external cash flows. Broker statements remain the source of "
-            "truth; public figures are reconciled before publication.",
+            "The weekly figure is a Modified Dietz return with day-weighted external cash flows. "
+            "Benchmarks are GBP total-return figures over exactly the same period. Broker "
+            "statements remain the source of truth; public figures are reconciled before "
+            "publication.",
             "",
         ]
     )

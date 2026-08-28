@@ -22,10 +22,16 @@ document on 17 October 2025, are the live blocker:
   consent.
 
 A Telegram button is valuable evidence of human review but is not a legal conclusion about those
-clauses. Before live use, obtain written Trading 212 confirmation describing the exact workflow:
-research model, deterministic sizing, fixed ticket, named-human approval, 24-hour expiry, fresh-price
-guard, low frequency, and personal account only. Record the response reference in both the environment
-and signed live-gate file.
+clauses. Because the model chooses the target weight and deterministic code converts it into a
+quantity, the workflow involves algorithmic order-parameter determination; human approval does not
+automatically take it outside the clause 4.2(a) definition. Before live use, obtain a written
+Trading 212 reply that AFFIRMATIVELY addresses clauses 4.2(a) and 6.7 for the exact workflow:
+research model, deterministic sizing, fixed ticket, named-human approval, 24-hour expiry,
+fresh-price guard, low frequency, and personal account only. A support ticket number or a generic
+"API access approved" is NOT sufficient — the live gate can only verify that a reference string
+exists, not what Trading 212 agreed to, so the human reviewer must hold the actual reply text.
+Record the response reference in both the environment and signed live-gate file, and archive the
+full reply under `docs/consent/` (git-ignored).
 
 The code also requires:
 
@@ -52,6 +58,14 @@ investment-analysis results to third parties is not personal use. Therefore:
 - never publish raw J-Quants rows or reconstructable tables;
 - obtain written licence clarification before a recurring public journal relies materially on it;
 - use current filings/news and tradable-instrument quotes for catalyst work.
+
+## yfinance / Yahoo data
+
+yfinance is unofficial and oriented to research/educational personal use. It is acceptable for this
+private experiment's daily closes, but raw Yahoo data must not be republished in the journal, and it
+must not be the sole execution-price authority: the pre-submission preflight also checks the broker's
+own fresh portfolio state. Note the pence trap: Yahoo reports London prices in "GBp" (pence);
+`normalize_currency_code` maps every pence spelling to GBX before any conversion.
 
 ## EDINET and TDnet
 

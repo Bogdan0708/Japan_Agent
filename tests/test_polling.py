@@ -59,6 +59,22 @@ class PollingTest(unittest.TestCase):
         offset, handled = poller.process([{"update_id": 7}], offset=0)
         self.assertEqual((offset, handled), (8, 1))
 
+    def test_api_fetch_client_timeout_outlives_long_poll(self) -> None:
+        # If the HTTP client gives up before Telegram's server-side wait ends,
+        # every getUpdates call times out locally and approvals crawl.
+        captured: dict[str, Any] = {}
+
+        class PostCapturingChannel(StubChannel):
+            def _post(self, path, values, *, timeout=15.0):
+                captured.update({"path": path, "values": values, "timeout": timeout})
+                return {"ok": True, "result": []}
+
+        poller = TelegramPoller(PostCapturingChannel({}))
+        poller._fetch_via_api(0, 50)
+        self.assertEqual(captured["path"], "/getUpdates")
+        self.assertEqual(captured["values"]["timeout"], "50")
+        self.assertGreater(captured["timeout"], 50)
+
     def test_missing_update_id_does_not_crash_or_rewind(self) -> None:
         channel = StubChannel({3: "approved"})
         poller = TelegramPoller(channel, fetch=lambda offset, timeout: [])

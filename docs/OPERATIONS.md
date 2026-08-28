@@ -2,14 +2,21 @@
 
 ## Daily cadence
 
-The intended 07:15 Europe/London job is a collector/research job, not an execution job. Run EDINET for
-the current Japanese date, import a cited TDnet digest and news digest, refresh normalized tradable
-quotes, and assemble research. The gate requires PRICE within 72 hours, JQUANTS within seven days,
-EDINET/TDNET within 36 hours, and NEWS within 24 hours. Empty successful disclosure results still need
-an ingest heartbeat; a failed network call does not.
+The intended 07:15 Europe/London job is a collector/research job, not an execution job.
+`scripts/daily.sh` runs EDINET for today's AND yesterday's Tokyo calendar dates (at 07:15 London it
+is already afternoon in Tokyo), imports any dropped TDnet/news digest, refreshes normalized tradable
+quotes, and assembles research with an atomic decision write under a run lock. The gate requires
+PRICE within 72 hours, JQUANTS within seven days, EDINET/TDNET within 36 hours, and NEWS within 24
+hours — checked against both the retrieval time and `observed_through`, so recently re-fetching old
+data cannot look fresh (J-Quants is exempt from the observation check because its free tier is
+inherently 12 weeks delayed). Empty successful disclosure results still need an ingest heartbeat; a
+failed network call does not.
 
-J-Quants Free is delayed and only needs a weekly historical-context refresh. It must not drive a claim
-that a catalyst is current.
+J-Quants Free is delayed and only needs a weekly historical-context refresh — `scripts/weekly.sh`
+does this automatically for the JPX codes mapped in `config/jquants-codes.json`, then runs a deep
+research pass, verifies the event-ledger hash chain (`verify-chain`), rebuilds the JSONL mirror, and
+renders the weekly post from the reconciled report. It must not drive a claim that a catalyst is
+current.
 
 ## Suggested cron shape
 
@@ -33,10 +40,12 @@ snapshot. Guessing that mapping would make the risk gate falsely green.
 ## Telegram approvals
 
 The default transport is `telegram-poll`: it long-polls getUpdates outbound over HTTPS, so no inbound
-port, TLS certificate, or reverse proxy is needed on a home machine. The bot token authenticates the
-connection; the poller supplies the configured secret internally and the same user/chat allowlist and
-ticket-hash checks apply. Run it as an unprivileged long-lived service (e.g. a systemd user unit or a
-tmux session started at boot).
+port, TLS certificate, or reverse proxy is needed on a home machine. On startup it calls
+deleteWebhook (Telegram refuses getUpdates while a webhook is registered), and the HTTP client
+timeout is set above the long-poll wait so requests do not time out locally. The bot token
+authenticates the connection; the poller supplies the configured secret internally and the same
+user/chat allowlist and ticket-hash checks apply. Run it as an unprivileged long-lived service
+(e.g. a systemd user unit or a tmux session started at boot).
 
 The webhook alternative remains for hosted deployments: run `telegram-serve` bound to localhost,
 terminate TLS in a maintained reverse proxy exposing only `/telegram/webhook`, and configure Telegram

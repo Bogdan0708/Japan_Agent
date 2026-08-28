@@ -20,6 +20,13 @@ SOURCE_MAX_AGES = {
     "NEWS": timedelta(hours=24),
 }
 
+SOURCE_ITEM_LIMITS = {
+    "EDINET": 35,
+    "TDNET": 30,
+    "NEWS": 25,
+    "JQUANTS": 10,
+}
+
 
 class ResearchSnapshotAssembler:
     def __init__(self, database: Database):
@@ -37,6 +44,15 @@ class ResearchSnapshotAssembler:
             age = now - run["completed_at"]
             if age < timedelta(0) or age > max_age:
                 failures.append(f"{source}: ingest age {age} exceeds {max_age}")
+            # A recent retrieval of old data must not look fresh: the observation
+            # window itself has to reach into the freshness horizon. J-Quants is
+            # exempt because its free tier is inherently 12 weeks delayed. A
+            # future observed_through (e.g. "end of today's Tokyo date") is fine.
+            observation_lag = now - run["observed_through"]
+            if source != "JQUANTS" and observation_lag > max_age:
+                failures.append(
+                    f"{source}: observations end {observation_lag} ago, beyond {max_age}"
+                )
             ingest_status[source] = run
         prices: list[dict[str, Any]] = []
         for ticker in whitelist_tickers:
@@ -53,7 +69,17 @@ class ResearchSnapshotAssembler:
                 prices.append(snapshot.to_dict())
         if failures:
             raise SnapshotIncomplete("; ".join(failures))
-        items = self.database.recent_research_items(since=now - timedelta(days=120), limit=100)
+        # Per-source quotas stop one busy feed (typically EDINET) from crowding
+        # every other source out of the model context. No whitelist-ticker filter
+        # here: EDINET/J-Quants use Japanese security codes, not T212 tickers.
+        items: list[dict[str, Any]] = []
+        for source, item_limit in SOURCE_ITEM_LIMITS.items():
+            items.extend(
+                self.database.recent_research_items(
+                    since=now - timedelta(days=120), limit=item_limit, source=source
+                )
+            )
+        items.sort(key=lambda item: str(item["published_at"]), reverse=True)
         bundle = {
             "assembled_at": now,
             "whitelist_tickers": whitelist_tickers,

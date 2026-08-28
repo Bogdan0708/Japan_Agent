@@ -48,6 +48,14 @@ class ProposalBuilderTests(unittest.TestCase):
             )
         self.assertIn("ABSOLUTE_POSITION_LIMIT", self.codes(raised.exception))
 
+    def test_frontier_sleeve_shares_the_satellite_cap(self) -> None:
+        with self.assertRaises(RiskRejected) as raised:
+            self.build(
+                decision=decision(target="0.20"),
+                instrument=instrument(sleeve=Sleeve.FRONTIER),
+            )
+        self.assertIn("ABSOLUTE_POSITION_LIMIT", self.codes(raised.exception))
+
     def test_rejects_cash_floor_breach(self) -> None:
         low_cash = Portfolio(
             cash_gbp=Decimal("6"),

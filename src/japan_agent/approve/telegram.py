@@ -122,7 +122,9 @@ class TelegramApprovalChannel:
             )
         return result
 
-    def _post(self, path: str, values: dict[str, str]) -> dict[str, Any]:
+    def _post(
+        self, path: str, values: dict[str, str], *, timeout: float = 15.0
+    ) -> dict[str, Any]:
         body = urllib.parse.urlencode(values).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
@@ -130,7 +132,7 @@ class TelegramApprovalChannel:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.loads(response.read())
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError("Telegram API rejected request")

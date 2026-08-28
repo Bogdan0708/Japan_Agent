@@ -27,15 +27,21 @@ broker POST, the code checks a fresh quote and a fresh Trading 212 portfolio sna
 - Trading 212 v0 demo/live adapter. Non-idempotent order POSTs are never automatically retried. An
   uncertain response enters `RECONCILIATION_REQUIRED` and blocks resubmission.
 - Local kill switch, broker reconciliation, weekly Markdown post generator, and independent live gates.
-- 25 standard-library tests covering limit violations, stale data, approval integrity, fresh-portfolio
-  preflight, duplicate POST prevention, uncertain outcomes, kill switch, and live refusal.
+- 46 standard-library tests covering limit violations, stale data, approval integrity, fresh-portfolio
+  preflight, duplicate POST prevention, uncertain outcomes, kill switch, live refusal, pence/FX
+  normalization, evidence-citation validation, Modified Dietz math, and approval polling.
 
-Also implemented since the first audit: automatic whitelist price collection with matched FX
-(`collect-prices` + `config/data-symbols.json`), a Telegram long-polling approval transport
-(`telegram-poll`, no inbound port needed), cron wrapper scripts (`scripts/daily.sh`,
-`scripts/weekly.sh`), the Trading 212 written-consent request draft
-([docs/T212-CONSENT-REQUEST.md](docs/T212-CONSENT-REQUEST.md)), and the human account checklist
-([docs/ACCOUNT-SETUP.md](docs/ACCOUNT-SETUP.md)).
+Also implemented since the first audit: automatic whitelist price collection with matched FX and
+Yahoo "GBp" pence normalization (`collect-prices` + `config/data-symbols.json`), a Telegram
+long-polling approval transport (`telegram-poll`, no inbound port; deletes any webhook and outlives
+the server-side wait), locked/atomic cron wrapper scripts (`scripts/daily.sh`, `scripts/weekly.sh`
+with Tokyo-calendar EDINET dates and a weekly J-Quants refresh), deterministic evidence-citation
+validation (every research claim must cite an ingested item), per-source research quotas, an
+observed-through freshness gate, append-only ledger triggers plus `verify-chain`, Modified Dietz
+weekly returns, an expanded `doctor`, a `FRONTIER` sleeve capped like satellites
+([docs/MANDATE-GUIDANCE.md](docs/MANDATE-GUIDANCE.md)), the Trading 212 written-consent request
+draft ([docs/T212-CONSENT-REQUEST.md](docs/T212-CONSENT-REQUEST.md)), and the human account
+checklist ([docs/ACCOUNT-SETUP.md](docs/ACCOUNT-SETUP.md)).
 
 Not yet complete: account creation (see the checklist), T212 instrument verification, live API
 response mapping to the fresh portfolio schema, the assistant-produced TDnet/news digests as a

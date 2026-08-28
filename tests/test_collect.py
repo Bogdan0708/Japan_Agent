@@ -74,6 +74,18 @@ class CollectTest(unittest.TestCase):
         )
         self.assertEqual(snapshots[0].price_gbp, Decimal("8.500000"))
 
+    def test_yahoo_gbp_lowercase_p_is_pence_not_pounds(self) -> None:
+        # Yahoo spells London pence "GBp"; uppercasing it to GBP would turn
+        # 850p into £850 — a silent 100x error.
+        source = FakeSource({"RBOT.L": (Decimal("850"), "GBp", NOW)})
+        snapshots = WhitelistPriceCollector(self.database, source).collect(
+            {"RBOT_EQ": rule("RBOT_EQ", "GBX")},
+            {"RBOT_EQ": "RBOT.L"},
+            source_label="test",
+        )
+        self.assertEqual(snapshots[0].price_gbp, Decimal("8.500000"))
+        self.assertEqual(snapshots[0].native_currency, "GBX")
+
     def test_stale_fx_fails_closed_without_heartbeat(self) -> None:
         source = FakeSource(
             {

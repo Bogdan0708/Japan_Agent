@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS events (
     previous_hash TEXT NOT NULL,
     event_hash TEXT NOT NULL UNIQUE
 );
+
+CREATE TRIGGER IF NOT EXISTS events_block_update BEFORE UPDATE ON events
+BEGIN SELECT RAISE(ABORT, 'events ledger is append-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS events_block_delete BEFORE DELETE ON events
+BEGIN SELECT RAISE(ABORT, 'events ledger is append-only'); END;
 """
 
 
@@ -267,17 +273,33 @@ class Database:
             "item_count": row["item_count"],
         }
 
-    def recent_research_items(self, *, since: datetime, limit: int = 100) -> list[dict[str, Any]]:
+    def research_item_exists(self, source: str, external_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM research_items WHERE source = ? AND external_id = ? LIMIT 1",
+                (source, external_id),
+            ).fetchone()
+        return row is not None
+
+    def recent_research_items(
+        self, *, since: datetime, limit: int = 100, source: str | None = None
+    ) -> list[dict[str, Any]]:
+        source_filter = " AND source = ?" if source is not None else ""
+        parameters: tuple[Any, ...] = (
+            (isoformat(since), source, limit)
+            if source is not None
+            else (isoformat(since), limit)
+        )
         with self.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT source, external_id, headline, published_at, retrieved_at, url, ticker,
                        payload_json
                   FROM research_items
-                 WHERE published_at >= ?
+                 WHERE published_at >= ?{source_filter}
                  ORDER BY published_at DESC LIMIT ?
                 """,
-                (isoformat(since), limit),
+                parameters,
             ).fetchall()
         return [
             {
@@ -513,6 +535,30 @@ class Database:
                 ),
             )
         return {**core, "event_hash": event_hash}
+
+    def verify_event_chain(self) -> int:
+        """Recompute every event hash and chain link; raise on the first break."""
+        from hashlib import sha256
+
+        previous_hash = "0" * 64
+        count = 0
+        for event in self.iter_events():
+            if event["previous_hash"] != previous_hash:
+                raise ValueError(f"event {event['sequence']}: broken chain linkage")
+            core = {
+                "event_id": event["event_id"],
+                "occurred_at": event["occurred_at"],
+                "kind": event["kind"],
+                "aggregate_id": event["aggregate_id"],
+                "payload": event["payload"],
+                "previous_hash": event["previous_hash"],
+            }
+            expected = sha256(canonical_json(core).encode("utf-8")).hexdigest()
+            if expected != event["event_hash"]:
+                raise ValueError(f"event {event['sequence']}: hash mismatch")
+            previous_hash = event["event_hash"]
+            count += 1
+        return count
 
     def iter_events(self) -> Iterator[dict[str, Any]]:
         with self.connect() as connection:

@@ -8,7 +8,7 @@ from typing import Protocol
 
 from ..models import InstrumentRule, PriceSnapshot
 from ..storage import Database
-from .prices import NormalizedPriceImporter
+from .prices import NormalizedPriceImporter, normalize_currency_code
 
 # Daily closes are compared across venues; weekends and holidays make small gaps
 # normal, but a wider gap means the FX observation cannot honestly price today's
@@ -78,8 +78,8 @@ class WhitelistPriceCollector:
         if not symbol:
             raise ValueError(f"no market-data symbol is mapped for {rule.ticker}")
         price, currency, observed_at = self.source.latest_daily_close(symbol)
-        currency = currency.upper()
-        expected = rule.native_currency.upper()
+        currency = normalize_currency_code(currency)
+        expected = normalize_currency_code(rule.native_currency)
         if currency != expected:
             raise ValueError(
                 f"{rule.ticker}: upstream currency {currency} does not match "

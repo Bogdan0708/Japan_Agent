@@ -20,6 +20,9 @@ class Action(StrEnum):
 class Sleeve(StrEnum):
     CORE = "CORE"
     SATELLITE = "SATELLITE"
+    # Higher-risk "revolutionary technology" positions. Deliberately shares the
+    # satellite absolute cap: frontier conviction never buys a bigger limit.
+    FRONTIER = "FRONTIER"
 
 
 class ProposalStatus(StrEnum):
