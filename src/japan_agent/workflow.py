@@ -25,12 +25,38 @@ class ProposalWorkflow:
         self.builder = builder or ProposalBuilder()
         self.approvals = ApprovalService(database)
 
-    def _citation_violations(self, decision: ResearchDecision) -> list[RiskViolation]:
-        """Deterministically verify every evidence citation against local storage.
+    def _citation_violations(
+        self, decision: ResearchDecision, now: datetime
+    ) -> list[RiskViolation]:
+        """Verify every evidence citation against the recorded research run.
 
-        The model's output is untrusted; a citation of a filing, headline, or
-        quote that does not exist in the snapshot database blocks the proposal.
+        Existence in the database is not enough: an item can exist yet never
+        have been in the bundle the model saw. Citations must come from the
+        run's snapshot manifest, and the run must be recent.
         """
+        if not decision.research_run_id:
+            return [
+                RiskViolation(
+                    "EVIDENCE_NO_RUN",
+                    "decision is not linked to a recorded research run",
+                )
+            ]
+        run = self.database.get_research_run(decision.research_run_id)
+        if run is None:
+            return [
+                RiskViolation(
+                    "EVIDENCE_NO_RUN",
+                    f"research run {decision.research_run_id!r} is not recorded",
+                )
+            ]
+        if now - run["assembled_at"] > timedelta(hours=24):
+            return [
+                RiskViolation(
+                    "EVIDENCE_STALE_RUN",
+                    "the cited research run's snapshot is older than 24 hours",
+                )
+            ]
+        permitted = run["permitted_citations"]
         violations: list[RiskViolation] = []
         for entry in decision.evidence:
             match = CITATION.match(entry)
@@ -43,15 +69,12 @@ class ProposalWorkflow:
                 )
                 continue
             source, reference = match.groups()
-            if source == "PRICE":
-                known = self.database.latest_snapshot(reference) is not None
-            else:
-                known = self.database.research_item_exists(source, reference)
-            if not known:
+            if f"{source}:{reference}" not in permitted:
                 violations.append(
                     RiskViolation(
                         "EVIDENCE_UNKNOWN_SOURCE",
-                        f"evidence cites nonexistent {source} item {reference!r}",
+                        f"evidence cites {source}:{reference}, which is not in the "
+                        "research run's snapshot manifest",
                     )
                 )
         return violations
@@ -59,7 +82,7 @@ class ProposalWorkflow:
     def propose(
         self, *, decision: ResearchDecision, portfolio: Portfolio, now: datetime
     ) -> TradeTicket:
-        citation_violations = self._citation_violations(decision)
+        citation_violations = self._citation_violations(decision, now)
         if citation_violations:
             self.database.append_event(
                 kind="PROPOSAL_BLOCKED",

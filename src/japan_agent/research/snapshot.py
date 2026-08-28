@@ -27,6 +27,10 @@ SOURCE_ITEM_LIMITS = {
     "JQUANTS": 10,
 }
 
+# Tolerated disagreement between this machine's clock and an upstream
+# timestamp. Anything further ahead is a dishonest coverage claim, not skew.
+CLOCK_SKEW = timedelta(minutes=15)
+
 
 class ResearchSnapshotAssembler:
     def __init__(self, database: Database):
@@ -46,10 +50,16 @@ class ResearchSnapshotAssembler:
                 failures.append(f"{source}: ingest age {age} exceeds {max_age}")
             # A recent retrieval of old data must not look fresh: the observation
             # window itself has to reach into the freshness horizon. J-Quants is
-            # exempt because its free tier is inherently 12 weeks delayed. A
-            # future observed_through (e.g. "end of today's Tokyo date") is fine.
+            # exempt because its free tier is inherently 12 weeks delayed. In the
+            # other direction, coverage claimed beyond now + clock skew is a
+            # dishonest observed_through, never acceptable for any source.
             observation_lag = now - run["observed_through"]
-            if source != "JQUANTS" and observation_lag > max_age:
+            if observation_lag < -CLOCK_SKEW:
+                failures.append(
+                    f"{source}: observed_through claims implausible future coverage "
+                    f"({-observation_lag} ahead)"
+                )
+            elif source != "JQUANTS" and observation_lag > max_age:
                 failures.append(
                     f"{source}: observations end {observation_lag} ago, beyond {max_age}"
                 )
@@ -96,3 +106,13 @@ class ResearchSnapshotAssembler:
         # Prove the bundle is serializable before it reaches an external model process.
         canonical_json(bundle)
         return bundle
+
+
+def permitted_citations(bundle: dict[str, Any]) -> list[str]:
+    """The exact citation IDs the model was shown in this bundle — nothing else
+    may be cited by the resulting decision."""
+    references = [f"PRICE:{price['ticker']}" for price in bundle["prices"]]
+    references.extend(
+        f"{item['source']}:{item['external_id']}" for item in bundle["research_items"]
+    )
+    return references

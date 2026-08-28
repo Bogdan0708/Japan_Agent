@@ -3,6 +3,12 @@
 Researched 2026-08-28. Licensing and pricing change; re-verify before extending
 usage.
 
+> Post-remediation verification found that the Sunday wrapper can report
+> success after stale-input research refusal, observation windows can point
+> implausibly into the future, and evidence is database-bound rather than bound
+> to the exact model snapshot. These remain open in
+> [post-remediation-audit-2026-08-28.md](post-remediation-audit-2026-08-28.md).
+
 ## Japanese market data
 
 | Source | Data | Cost / access | Role here |
@@ -39,7 +45,7 @@ survivorship); agent "debate" amplifies shared errors; every model output must
 become a structured, auditable object with thesis, evidence IDs, timestamps,
 confidence, and a falsifiable invalidation condition.
 
-## Guardrails adopted (all implemented)
+## Guardrails adopted
 
 Fail-closed everywhere; whitelist-only cash instruments; 40% NAV cap; £15
 satellite/frontier cap; 3 trades/week; £5 cash floor; price collars via

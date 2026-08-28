@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS executions (
     error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS research_runs (
+    run_id TEXT PRIMARY KEY,
+    assembled_at TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    permitted_citations_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
@@ -271,6 +279,44 @@ class Database:
             "completed_at": parse_datetime(row["completed_at"]),
             "observed_through": parse_datetime(row["observed_through"]),
             "item_count": row["item_count"],
+        }
+
+    def save_research_run(
+        self,
+        *,
+        run_id: str,
+        assembled_at: datetime,
+        snapshot_hash: str,
+        permitted_citations: list[str],
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO research_runs(
+                    run_id, assembled_at, snapshot_hash, permitted_citations_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    isoformat(assembled_at),
+                    snapshot_hash,
+                    canonical_json(permitted_citations),
+                    isoformat(utc_now()),
+                ),
+            )
+
+    def get_research_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "assembled_at": parse_datetime(row["assembled_at"]),
+            "snapshot_hash": row["snapshot_hash"],
+            "permitted_citations": set(json.loads(row["permitted_citations_json"])),
         }
 
     def research_item_exists(self, source: str, external_id: str) -> bool:

@@ -140,12 +140,16 @@ class ResearchDecision:
     target_weight: Decimal
     confidence: Decimal
     invalidation_condition: str
+    # Links the decision to the recorded research run whose snapshot manifest
+    # bounds what it may cite. Attached by the CLI, never by the model.
+    research_run_id: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ResearchDecision:
         evidence = value.get("evidence")
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
             raise ValueError("evidence must be a list of strings")
+        run_id = value.get("research_run_id")
         decision = cls(
             thesis=str(value["thesis"]).strip(),
             evidence=tuple(item.strip() for item in evidence if item.strip()),
@@ -154,6 +158,7 @@ class ResearchDecision:
             target_weight=decimal(value["target_weight"]),
             confidence=decimal(value["confidence"]),
             invalidation_condition=str(value["invalidation_condition"]).strip(),
+            research_run_id=str(run_id).strip() if run_id else None,
         )
         if not Decimal("0") <= decision.target_weight <= Decimal("1"):
             raise ValueError("target_weight must be between 0 and 1")

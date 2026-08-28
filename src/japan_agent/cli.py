@@ -31,7 +31,7 @@ from .models import (
 )
 from .storage import Database
 from .research import AgentSdkResearcher
-from .research.snapshot import ResearchSnapshotAssembler
+from .research.snapshot import ResearchSnapshotAssembler, permitted_citations
 from .time import parse_datetime, utc_now
 from .workflow import ProposalWorkflow
 
@@ -173,6 +173,10 @@ def command_ingest_digest(args: argparse.Namespace) -> None:
 
 
 def command_research(args: argparse.Namespace) -> None:
+    from dataclasses import replace
+    from hashlib import sha256
+    from uuid import uuid4
+
     settings = _settings(_root(args.root))
     database = _database(settings)
     tickers = list(settings.load_whitelist())
@@ -181,16 +185,32 @@ def command_research(args: argparse.Namespace) -> None:
     bundle = ResearchSnapshotAssembler(database).assemble(
         whitelist_tickers=tickers, now=utc_now()
     )
-    result = asyncio.run(AgentSdkResearcher(settings.claude_model).decide(bundle))
+    portfolio = _read_json(args.portfolio) if args.portfolio else None
+    # Record what the model is about to see BEFORE it sees it: the run manifest
+    # is the only set of citations a resulting decision may use.
+    run_id = str(uuid4())
+    database.save_research_run(
+        run_id=run_id,
+        assembled_at=bundle["assembled_at"],
+        snapshot_hash=sha256(canonical_json(bundle).encode("utf-8")).hexdigest(),
+        permitted_citations=permitted_citations(bundle),
+    )
+    result = asyncio.run(
+        AgentSdkResearcher(settings.claude_model).decide(
+            bundle, mode=args.mode, portfolio=portfolio
+        )
+    )
+    decision = replace(result, research_run_id=run_id)
     database.append_event(
         kind="RESEARCH_DECISION",
         aggregate_id=None,
         payload={
-            "decision": result.__dict__,
+            "decision": decision.__dict__,
+            "mode": args.mode,
             "snapshot_assembled_at": bundle["assembled_at"],
         },
     )
-    print(canonical_json(result.__dict__))
+    print(canonical_json(decision.__dict__))
 
 
 def command_propose(args: argparse.Namespace) -> None:
@@ -382,7 +402,10 @@ def command_status(args: argparse.Namespace) -> None:
 
 
 def command_doctor(args: argparse.Namespace) -> None:
+    from importlib.util import find_spec
+
     settings = _settings(_root(args.root))
+    database = _database(settings)
     whitelist = settings.load_whitelist()
     try:
         data_symbols = load_data_symbols(settings.root / "config" / "data-symbols.json")
@@ -391,44 +414,80 @@ def command_doctor(args: argparse.Namespace) -> None:
     env_path = settings.root / ".env"
     env_mode_strict = env_path.is_file() and (env_path.stat().st_mode & 0o077) == 0
     try:
-        _database(settings).verify_event_chain()
+        database.verify_event_chain()
         chain_intact = True
     except ValueError:
         chain_intact = False
-    checks = {
-        "database_parent_writable": os.access(settings.database_path.parent, os.W_OK),
-        "whitelist_verified_nonempty": bool(whitelist),
-        "data_symbols_cover_whitelist": bool(whitelist)
-        and all(ticker in data_symbols for ticker in whitelist),
-        "persona_exists": (settings.root / "PERSONA.md").is_file(),
-        "mandate_exists": (settings.root / "MANDATE.md").is_file(),
-        "t212_credentials_present": bool(settings.t212_api_key and settings.t212_api_secret),
-        "telegram_settings_present": all(
-            (
-                settings.telegram_bot_token,
-                settings.telegram_approver_user_id,
-                settings.telegram_approval_chat_id,
-                settings.telegram_webhook_secret,
+    # The freshness gate must pass right now, or scheduled research is unusable
+    # regardless of how many keys are configured.
+    gate_passes = False
+    if whitelist:
+        try:
+            ResearchSnapshotAssembler(database).assemble(
+                whitelist_tickers=list(whitelist), now=utc_now()
             )
-        ),
-        "anthropic_key_present": bool(os.getenv("ANTHROPIC_API_KEY")),
-        "research_source_keys_present": bool(
-            settings.jquants_api_key and settings.edinet_api_key
-        ),
-        "env_file_permissions_strict": env_mode_strict,
-        "event_chain_intact": chain_intact,
-        "killswitch_clear": not settings.killswitch_path.exists(),
+            gate_passes = True
+        except Exception:
+            gate_passes = False
+    # Grouped so a green state is legible: static setup, secrets, installed
+    # dependencies, current data freshness, and ledger integrity are different
+    # kinds of readiness and fail for different reasons.
+    grouped_checks: dict[str, dict[str, bool]] = {
+        "setup": {
+            "database_parent_writable": os.access(settings.database_path.parent, os.W_OK),
+            "whitelist_verified_nonempty": bool(whitelist),
+            "data_symbols_cover_whitelist": bool(whitelist)
+            and all(ticker in data_symbols for ticker in whitelist),
+            "jquants_codes_config_present": (
+                settings.root / "config" / "jquants-codes.json"
+            ).is_file(),
+            "persona_exists": (settings.root / "PERSONA.md").is_file(),
+            "mandate_exists": (settings.root / "MANDATE.md").is_file(),
+        },
+        "credentials": {
+            "t212_credentials_present": bool(
+                settings.t212_api_key and settings.t212_api_secret
+            ),
+            "telegram_settings_present": all(
+                (
+                    settings.telegram_bot_token,
+                    settings.telegram_approver_user_id,
+                    settings.telegram_approval_chat_id,
+                    settings.telegram_webhook_secret,
+                )
+            ),
+            "anthropic_key_present": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "research_source_keys_present": bool(
+                settings.jquants_api_key and settings.edinet_api_key
+            ),
+            "env_file_permissions_strict": env_mode_strict,
+        },
+        "dependencies": {
+            "research_sdk_installed": find_spec("claude_agent_sdk") is not None,
+            "yfinance_installed": find_spec("yfinance") is not None,
+        },
+        "data-freshness": {
+            "freshness_gate_passes_now": gate_passes,
+        },
+        "integrity": {
+            "event_chain_intact": chain_intact,
+            "killswitch_clear": not settings.killswitch_path.exists(),
+        },
     }
     if settings.t212_environment == "live":
         try:
             assert_environment_allowed(settings, utc_now())
         except Exception:
-            checks["live_gate"] = False
+            grouped_checks["integrity"]["live_gate"] = False
         else:
-            checks["live_gate"] = True
-    for name, passed in checks.items():
-        print(f"{'PASS' if passed else 'FAIL'} {name}")
-    if not all(checks.values()):
+            grouped_checks["integrity"]["live_gate"] = True
+    all_passed = True
+    for group, checks in grouped_checks.items():
+        print(f"[{group}]")
+        for name, passed in checks.items():
+            all_passed = all_passed and passed
+            print(f"  {'PASS' if passed else 'FAIL'} {name}")
+    if not all_passed:
         raise RuntimeError("doctor found blocking setup failures")
 
 
@@ -468,9 +527,15 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("file")
     digest.set_defaults(func=command_ingest_digest)
 
-    subparsers.add_parser("research", help="run Claude on a complete fresh snapshot").set_defaults(
-        func=command_research
+    research = subparsers.add_parser("research", help="run Claude on a complete fresh snapshot")
+    research.add_argument(
+        "--mode", choices=["daily", "weekly"], default="daily",
+        help="daily catalyst pass, or the weekly portfolio review (requires --portfolio)",
     )
+    research.add_argument(
+        "--portfolio", help="reconciled portfolio JSON; required for the weekly review"
+    )
+    research.set_defaults(func=command_research)
 
     propose = subparsers.add_parser("propose", help="risk-check one structured research decision")
     propose.add_argument("--decision", required=True)

@@ -13,10 +13,14 @@ inherently 12 weeks delayed). Empty successful disclosure results still need an 
 failed network call does not.
 
 J-Quants Free is delayed and only needs a weekly historical-context refresh — `scripts/weekly.sh`
-does this automatically for the JPX codes mapped in `config/jquants-codes.json`, then runs a deep
-research pass, verifies the event-ledger hash chain (`verify-chain`), rebuilds the JSONL mirror, and
-renders the weekly post from the reconciled report. It must not drive a claim that a catalyst is
-current.
+does this automatically for the JPX codes mapped in `config/jquants-codes.json`. The Sunday job then
+ingests the Sunday TDnet/news digests (they MUST be produced before 10:00 — the NEWS gate is 24
+hours, so Friday's heartbeat is stale by Sunday), refreshes whitelist quotes, and runs
+`research --mode weekly --portfolio data/portfolio.json`: a distinct portfolio review (drift vs the
+mandate structure, invalidation-condition checks, rebalance assessment) against the reconciled
+portfolio. **A weekly research refusal fails the job with a non-zero exit** — journal sync and the
+report render still run first, but monitoring must see red when the advertised deep review did not
+happen. It must not drive a claim that a catalyst is current.
 
 ## Suggested cron shape
 

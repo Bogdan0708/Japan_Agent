@@ -26,9 +26,9 @@ fi
   python3 -m japan_agent.cli collect-prices
 
   # EDINET publishes on Tokyo's calendar. At 07:15 London it is already
-  # afternoon in Tokyo, so ingest today's Tokyo date (the current filing day)
-  # and yesterday's (anything filed after the previous run).
-  for tokyo_date in "$(TZ=Asia/Tokyo date +%F)" "$(TZ=Asia/Tokyo date -d yesterday +%F)"; do
+  # afternoon in Tokyo. Ingest yesterday FIRST, then today, so the LAST
+  # recorded heartbeat carries the freshest (current-day) coverage window.
+  for tokyo_date in "$(TZ=Asia/Tokyo date -d yesterday +%F)" "$(TZ=Asia/Tokyo date +%F)"; do
     python3 -m japan_agent.cli ingest-edinet --date "$tokyo_date"
   done
 

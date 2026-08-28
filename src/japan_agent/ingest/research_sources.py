@@ -129,7 +129,13 @@ class ResearchSourceIngester:
                 payload=item,
             )
             count += 1
-        observed_through = datetime.combine(filing_date, datetime.max.time(), tzinfo=UTC)
+        # Coverage is honest only up to what could actually have been retrieved:
+        # the end of the requested date on Tokyo's calendar for historical days,
+        # but never beyond the retrieval moment for the current (partial) day.
+        tokyo_end = datetime.combine(
+            filing_date, datetime.max.time(), tzinfo=ZoneInfo("Asia/Tokyo")
+        ).astimezone(UTC)
+        observed_through = min(tokyo_end, retrieved_at)
         self.database.record_ingest_run(
             source="EDINET",
             completed_at=retrieved_at,
