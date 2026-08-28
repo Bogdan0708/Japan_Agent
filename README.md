@@ -148,6 +148,7 @@ tests/          zero-network safety tests
 pages/          public-journal skeleton (no raw licensed data)
 ```
 
-Further details: [architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md), and
-[compliance/live gate](docs/COMPLIANCE.md).
+Further details: [architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md),
+[compliance/live gate](docs/COMPLIANCE.md), and the dated
+[research archive](docs/research/README.md) (brokers, universe, legal, data, audit record).
 
