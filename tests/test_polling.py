@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import urllib.error
 from typing import Any
 
 from japan_agent.approve.polling import TelegramPoller
@@ -58,6 +59,14 @@ class PollingTest(unittest.TestCase):
         poller = TelegramPoller(channel, fetch=lambda offset, timeout: [])
         offset, handled = poller.process([{"update_id": 7}], offset=0)
         self.assertEqual((offset, handled), (8, 1))
+
+    def test_network_ack_failure_still_counts_as_handled(self) -> None:
+        # answerCallbackQuery uses urlopen, which raises URLError (an OSError,
+        # not a RuntimeError) on network failure; the daemon must survive it.
+        channel = StubChannel({8: urllib.error.URLError("connection reset")})
+        poller = TelegramPoller(channel, fetch=lambda offset, timeout: [])
+        offset, handled = poller.process([{"update_id": 8}], offset=0)
+        self.assertEqual((offset, handled), (9, 1))
 
     def test_api_fetch_client_timeout_outlives_long_poll(self) -> None:
         # If the HTTP client gives up before Telegram's server-side wait ends,

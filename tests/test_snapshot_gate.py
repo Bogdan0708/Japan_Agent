@@ -56,7 +56,8 @@ class ResearchSnapshotGateTests(unittest.TestCase):
             )
         self.assertIn("NEWS: no successful ingest", str(raised.exception))
 
-    def test_complete_fresh_bundle_passes(self) -> None:
+    def test_fresh_heartbeats_for_all_sources_pass(self) -> None:
+        # Proves heartbeat freshness only; batch completeness is not yet gated.
         for source in ("PRICE", "JQUANTS", "EDINET", "TDNET", "NEWS"):
             self.record(source)
         bundle = ResearchSnapshotAssembler(self.database).assemble(

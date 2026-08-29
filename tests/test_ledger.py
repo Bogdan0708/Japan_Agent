@@ -41,10 +41,19 @@ class LedgerImmutabilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.database.verify_event_chain()
 
-    def test_reordered_chain_breaks_verification(self) -> None:
+    def test_deleted_event_breaks_verification(self) -> None:
         with self.database.connect() as connection:
             connection.execute("DROP TRIGGER events_block_delete")
             connection.execute("DELETE FROM events WHERE sequence = 1")
+        with self.assertRaises(ValueError):
+            self.database.verify_event_chain()
+
+    def test_reordered_events_break_verification(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER events_block_update")
+            connection.execute("UPDATE events SET sequence = -1 WHERE sequence = 1")
+            connection.execute("UPDATE events SET sequence = 1 WHERE sequence = 2")
+            connection.execute("UPDATE events SET sequence = 2 WHERE sequence = -1")
         with self.assertRaises(ValueError):
             self.database.verify_event_chain()
 

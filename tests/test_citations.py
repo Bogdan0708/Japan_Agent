@@ -133,6 +133,19 @@ class CitationValidationTest(unittest.TestCase):
             )
         self.assertIn("EVIDENCE_STALE_RUN", self.codes(raised.exception))
 
+    def test_future_run_is_rejected(self) -> None:
+        self.database.save_research_run(
+            run_id="future-run",
+            assembled_at=NOW + timedelta(days=30),
+            snapshot_hash="c" * 64,
+            permitted_citations=["PRICE:TEST_EQ"],
+        )
+        with self.assertRaises(RiskRejected) as raised:
+            self.propose(
+                cited_decision("[PRICE:TEST_EQ] Quote observed.", run_id="future-run")
+            )
+        self.assertIn("EVIDENCE_FUTURE_RUN", self.codes(raised.exception))
+
     def test_valid_citations_produce_a_ticket(self) -> None:
         ticket = self.propose(
             cited_decision(

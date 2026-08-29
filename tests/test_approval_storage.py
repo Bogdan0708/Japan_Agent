@@ -8,8 +8,10 @@ from datetime import timedelta
 from pathlib import Path
 
 from japan_agent.approve import ApprovalService
+from japan_agent.models import ProposalStatus
 from japan_agent.risk import ProposalBuilder
 from japan_agent.storage import Database
+from japan_agent.time import isoformat
 
 from .helpers import NOW, decision, instrument, portfolio, snapshot
 
@@ -50,7 +52,7 @@ class ApprovalStorageTests(unittest.TestCase):
         )
         self.assertEqual(stored.approved_by, "Bogdan")
 
-    def test_expired_ticket_cannot_be_approved(self) -> None:
+    def test_expired_proposal_is_marked_expired_after_refusal(self) -> None:
         with self.assertRaises(ValueError):
             self.approvals.approve(
                 self.ticket.proposal_id,
@@ -58,6 +60,37 @@ class ApprovalStorageTests(unittest.TestCase):
                 expected_hash=self.ticket.fingerprint,
                 now=NOW + timedelta(hours=25),
             )
+        stored = self.database.get_proposal(self.ticket.proposal_id)
+        assert stored is not None
+        self.assertIs(stored.status, ProposalStatus.EXPIRED)
+
+    def test_expired_proposal_stops_blocking_duplicates(self) -> None:
+        self.assertTrue(
+            self.database.has_open_duplicate("TEST_EQ", "BUY", now=NOW + timedelta(minutes=5))
+        )
+        self.assertFalse(
+            self.database.has_open_duplicate("TEST_EQ", "BUY", now=NOW + timedelta(hours=25))
+        )
+
+    def test_duplicate_matching_is_exact_not_a_like_pattern(self) -> None:
+        # SQL LIKE treats "_" as a wildcard, and real T212 tickers contain it.
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proposals(
+                    proposal_id, status, ticket_json, ticket_hash, created_at, expires_at
+                ) VALUES (?, 'PENDING', ?, ?, ?, ?)
+                """,
+                (
+                    "lookalike",
+                    '{"ticker":"TESTXEQ","side":"SELL"}',
+                    "f" * 64,
+                    isoformat(NOW),
+                    isoformat(NOW + timedelta(days=1)),
+                ),
+            )
+        self.assertTrue(self.database.has_open_duplicate("TESTXEQ", "SELL", now=NOW))
+        self.assertFalse(self.database.has_open_duplicate("TEST_EQ", "SELL", now=NOW))
 
     def test_ticket_columns_are_immutable_in_sqlite(self) -> None:
         with self.assertRaises(sqlite3.IntegrityError):

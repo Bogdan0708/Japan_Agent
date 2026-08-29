@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -8,9 +9,35 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from japan_agent.ingest import normalize_price_gbp
-from japan_agent.ingest.prices import normalize_currency_code
+from japan_agent.ingest.prices import NormalizedPriceImporter, normalize_currency_code
 from japan_agent.ingest.research_sources import ResearchSourceIngester
 from japan_agent.storage import Database
+
+
+class ManualImportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.database = Database(root / "agent.sqlite3")
+        self.database.initialize()
+        self.path = root / "prices.json"
+
+    def test_invalid_item_leaves_no_partial_import(self) -> None:
+        good = {
+            "ticker": "TEST_EQ",
+            "native_price": "10",
+            "native_currency": "GBP",
+            "observed_at": "2026-08-28T12:00:00Z",
+            "source": "manual",
+        }
+        bad = dict(good, ticker="TEST2_EQ", native_price="-1")
+        self.path.write_text(json.dumps([good, bad]), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            NormalizedPriceImporter(self.database).import_file(self.path)
+        self.assertIsNone(self.database.latest_snapshot("TEST_EQ"))
+        self.assertEqual(list(self.database.iter_events()), [])
+        self.assertIsNone(self.database.latest_successful_ingest("PRICE"))
 
 
 class PriceNormalizationTests(unittest.TestCase):

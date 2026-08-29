@@ -87,12 +87,22 @@ class ProposalBuilderTests(unittest.TestCase):
         self.assertIn("WEEKLY_TRADE_LIMIT", self.codes(raised.exception))
         self.assertIn("DUPLICATE_OPEN", self.codes(raised.exception))
 
-    def test_sell_is_negative_and_cannot_exceed_holding(self) -> None:
+    def test_sell_quantity_is_negative(self) -> None:
         ticket = self.build(
             decision=decision(action=Action.SELL, target="0.10"),
             portfolio=portfolio(cash="50", quantity="5", position_value="50"),
         )
         self.assertEqual(ticket.quantity, Decimal("-4.0000"))
+
+    def test_sell_exceeding_holding_is_rejected(self) -> None:
+        # Position is worth £50 at £10/share but only 1 share is actually held;
+        # selling to a 0% target would require 5 shares.
+        with self.assertRaises(RiskRejected) as raised:
+            self.build(
+                decision=decision(action=Action.SELL, target="0"),
+                portfolio=portfolio(cash="50", quantity="1", position_value="50"),
+            )
+        self.assertIn("INSUFFICIENT_SHARES", self.codes(raised.exception))
 
 
 if __name__ == "__main__":
