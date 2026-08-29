@@ -27,7 +27,7 @@ broker POST, the code checks a fresh quote and a fresh Trading 212 portfolio sna
 - Trading 212 v0 demo/live adapter. Non-idempotent order POSTs are never automatically retried. An
   uncertain response enters `RECONCILIATION_REQUIRED` and blocks resubmission.
 - Local kill switch, broker reconciliation, weekly Markdown post generator, and independent live gates.
-- 62 standard-library tests covering limit violations, stale data, approval integrity, fresh-portfolio
+- A standard-library test suite (run `python3 -W error::ResourceWarning -m unittest discover`) covering limit violations, stale data, approval integrity, fresh-portfolio
   preflight, duplicate POST prevention, uncertain outcomes, kill switch, live refusal, pence/FX
   normalization, snapshot-manifest citation binding, future-coverage rejection, EDINET coverage
   honesty, ledger trigger/tamper detection, Modified Dietz math, and approval polling.

@@ -6,7 +6,9 @@ usage.
 > Post-remediation verification found that the Sunday wrapper can report
 > success after stale-input research refusal, observation windows can point
 > implausibly into the future, and evidence is database-bound rather than bound
-> to the exact model snapshot. These remain open in
+> to the exact model snapshot. All three were subsequently remediated (see
+> commit 95cdd6c and the tests for the Sunday job, future-coverage rejection,
+> and manifest-bound citations); the original findings are recorded in
 > [post-remediation-audit-2026-08-28.md](post-remediation-audit-2026-08-28.md).
 
 ## Japanese market data
