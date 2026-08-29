@@ -59,9 +59,15 @@ class NormalizedPriceImporter:
         items = value if isinstance(value, list) else value.get("prices", [])
         if not isinstance(items, list) or not items:
             raise ValueError("price import must contain a non-empty prices list")
-        snapshots: list[PriceSnapshot] = []
-        for item in items:
-            snapshots.append(self.import_item(item))
+        # Prevalidated batch: every item is parsed before anything is persisted,
+        # so a bad item cannot leave a partial import. Persistence itself is not
+        # yet one transaction — a database failure mid-batch can still leave
+        # partial writes until the state+ledger atomicity refactor.
+        parsed = [self.parse_item(item) for item in items]
+        snapshots = [
+            self._persist(snapshot, item)
+            for snapshot, item in zip(parsed, items, strict=True)
+        ]
         completed_at = max(snapshot.observed_at for snapshot in snapshots)
         self.database.record_ingest_run(
             source="PRICE",
@@ -72,6 +78,9 @@ class NormalizedPriceImporter:
         return snapshots
 
     def import_item(self, item: dict[str, Any]) -> PriceSnapshot:
+        return self._persist(self.parse_item(item), item)
+
+    def parse_item(self, item: dict[str, Any]) -> PriceSnapshot:
         native_price = decimal(item["native_price"])
         native_currency = normalize_currency_code(str(item["native_currency"]))
         conversion = (
@@ -79,7 +88,7 @@ class NormalizedPriceImporter:
             if item.get("gbp_per_native_unit") is not None
             else None
         )
-        snapshot = PriceSnapshot(
+        return PriceSnapshot(
             ticker=str(item["ticker"]),
             native_price=native_price,
             native_currency=native_currency,
@@ -89,6 +98,8 @@ class NormalizedPriceImporter:
             observed_at=parse_datetime(str(item["observed_at"])),
             source=str(item["source"]),
         )
+
+    def _persist(self, snapshot: PriceSnapshot, item: dict[str, Any]) -> PriceSnapshot:
         self.database.save_snapshot(snapshot, raw=item)
         self.database.append_event(
             kind="PRICE_SNAPSHOT_INGESTED",

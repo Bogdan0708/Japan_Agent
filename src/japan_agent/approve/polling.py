@@ -62,9 +62,10 @@ class TelegramPoller:
                 # Never log update contents: they can carry usernames and payloads.
                 print(f"ignored update {update_id}", file=sys.stderr)
                 continue
-            except RuntimeError:
+            except (RuntimeError, OSError):
                 # The decision is recorded before answerCallbackQuery; only the
-                # cosmetic acknowledgement can fail here.
+                # cosmetic acknowledgement can fail here. Network failures from
+                # urlopen surface as URLError, an OSError, not a RuntimeError.
                 print(f"processed update {update_id}; Telegram ack failed", file=sys.stderr)
                 handled += 1
                 continue

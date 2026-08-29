@@ -4,6 +4,7 @@ import json
 import stat
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -38,16 +39,19 @@ class LiveGate:
         mode = stat.S_IMODE(path.stat().st_mode)
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
             raise ExecutionBlocked("live gate file must not be accessible by group or others")
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return cls(
-            approved_by=str(value["approved_by"]),
-            reviewed_at=parse_datetime(str(value["reviewed_at"])),
-            paper_tracking_started_at=parse_datetime(str(value["paper_tracking_started_at"])),
-            manual_fix_free_days=int(value["manual_fix_free_days"]),
-            no_risk_breaches=value["no_risk_breaches"] is True,
-            journal_verified=value["journal_verified"] is True,
-            compliance_confirmation_reference=str(value["compliance_confirmation_reference"]),
-        )
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return cls(
+                approved_by=str(value["approved_by"]),
+                reviewed_at=parse_datetime(str(value["reviewed_at"])),
+                paper_tracking_started_at=parse_datetime(str(value["paper_tracking_started_at"])),
+                manual_fix_free_days=int(value["manual_fix_free_days"]),
+                no_risk_breaches=value["no_risk_breaches"] is True,
+                journal_verified=value["journal_verified"] is True,
+                compliance_confirmation_reference=str(value["compliance_confirmation_reference"]),
+            )
+        except (ValueError, KeyError, TypeError) as error:
+            raise ExecutionBlocked("live gate file is malformed") from error
 
 
 def assert_environment_allowed(settings: Settings, now: datetime) -> None:
@@ -75,6 +79,16 @@ def assert_environment_allowed(settings: Settings, now: datetime) -> None:
         raise ExecutionBlocked("paper risk and journal gates have not passed")
     if gate.reviewed_at > ensure_utc(now):
         raise ExecutionBlocked("live gate review timestamp is in the future")
+
+
+def _quantity_mismatch(reported: Any, approved: Decimal) -> bool:
+    """An absent quantity is tolerated; a present one must equal the approved amount."""
+    if reported is None:
+        return False
+    try:
+        return Decimal(str(reported)) != approved
+    except InvalidOperation:
+        return True
 
 
 class ExecutionService:
@@ -114,6 +128,7 @@ class ExecutionService:
         if stored.approved_at is None or stored.approved_by is None:
             raise ExecutionBlocked("approval identity or timestamp is missing")
         if now >= ticket.expires_at:
+            self.database.mark_expired(proposal_id)
             raise ExecutionBlocked("approved ticket has expired")
         if current_snapshot.ticker != ticket.ticker:
             raise ExecutionBlocked("execution quote ticker does not match approved ticket")
@@ -194,13 +209,17 @@ class ExecutionService:
             order_id is None
             or (response_ticker is not None and response_ticker != ticket.ticker)
             or (response_side is not None and str(response_side).upper() != ticket.side.value)
+            or _quantity_mismatch(response.get("quantity"), ticket.quantity)
+            or response.get("extendedHours") not in (None, False)
+            or str(response.get("status", "")).upper() in {"REJECTED", "CANCELLED"}
         ):
             self._mark_unknown(
                 proposal_id,
                 stored.ticket_hash,
                 now,
-                "broker response missing id or returned a different ticker",
+                "broker response does not match the approved ticket",
                 response,
+                broker_order_id=str(order_id) if order_id is not None else None,
             )
             raise ManualReconciliationRequired("ambiguous broker response requires reconciliation")
 
@@ -231,7 +250,26 @@ class ExecutionService:
             raise ManualReconciliationRequired(
                 "no broker order id is known; inspect broker history manually"
             )
-        response = self.broker.order(claim.broker_order_id)
+        stored = self.database.get_proposal(proposal_id)
+        try:
+            response = self.broker.order(claim.broker_order_id)
+        except BrokerRejected as error:
+            if error.status != 404:
+                raise
+            # Terminal orders disappear from the pending endpoint; check history.
+            found = None
+            for item in self.broker.order_history(
+                ticker=stored.ticket.ticker if stored is not None else None
+            ):
+                if str(item.get("id")) == claim.broker_order_id:
+                    found = item
+                    break
+            if found is None:
+                raise ManualReconciliationRequired(
+                    "order is absent from both the pending and history endpoints; "
+                    "inspect the broker manually"
+                ) from error
+            response = found
         status = str(response.get("status", "")).upper()
         if status == "FILLED":
             state = "FILLED"
@@ -268,12 +306,15 @@ class ExecutionService:
         now: datetime,
         error: str,
         response: dict[str, Any] | None = None,
+        *,
+        broker_order_id: str | None = None,
     ) -> None:
         self.database.update_execution(
             proposal_id,
             state="UNKNOWN",
             now=now,
             response=response,
+            broker_order_id=broker_order_id,
             error=error,
             proposal_status=ProposalStatus.RECONCILIATION_REQUIRED,
         )

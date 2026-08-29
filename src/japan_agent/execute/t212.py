@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
@@ -98,9 +99,21 @@ class Trading212Client:
         self.timeout = timeout
 
     def _json_request(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        raw_body: str | None = None,
     ) -> Any:
-        body = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else None
+        if raw_body is not None:
+            body: bytes | None = raw_body.encode()
+        else:
+            body = (
+                json.dumps(payload, separators=(",", ":")).encode()
+                if payload is not None
+                else None
+            )
         headers = dict(self.headers)
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -113,7 +126,9 @@ class Trading212Client:
         )
         if not 200 <= result.status < 300:
             text = result.body.decode("utf-8", errors="replace")
-            if method == "POST" and result.status in {408, 429, 500, 502, 503, 504}:
+            # Every 5xx (plus timeout/throttle) leaves the order outcome unknowable:
+            # the request may have been processed before the failure was reported.
+            if method == "POST" and (result.status >= 500 or result.status in {408, 429}):
                 raise BrokerTransportUncertain(
                     f"broker returned HTTP {result.status}; order outcome needs reconciliation"
                 )
@@ -149,15 +164,16 @@ class Trading212Client:
         self, *, ticker: str, quantity: Decimal, extended_hours: bool = False
     ) -> dict[str, Any]:
         # Official endpoint is non-idempotent. Do not add a generic retry here.
-        result = self._json_request(
-            "POST",
-            "/equity/orders/market",
-            {
-                "ticker": ticker,
-                "quantity": float(quantity),
-                "extendedHours": extended_hours,
-            },
+        # The quantity is serialized as exact decimal text, never through float,
+        # so the wire carries precisely the human-approved amount.
+        raw_body = (
+            "{"
+            + f'"ticker":{json.dumps(ticker)}'
+            + f',"quantity":{quantity:f}'
+            + f',"extendedHours":{"true" if extended_hours else "false"}'
+            + "}"
         )
+        result = self._json_request("POST", "/equity/orders/market", raw_body=raw_body)
         if not isinstance(result, dict):
             raise BrokerTransportUncertain("broker did not return an order object")
         return result
@@ -168,6 +184,22 @@ class Trading212Client:
             raise BrokerError("unexpected order response")
         return result
 
+    def order_history(
+        self, *, ticker: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        # Filled/rejected/cancelled orders leave the pending endpoint and are
+        # only visible here.
+        query = {"limit": str(limit)}
+        if ticker:
+            query["ticker"] = ticker
+        result = self._json_request(
+            "GET", "/equity/history/orders?" + urllib.parse.urlencode(query)
+        )
+        items = result.get("items") if isinstance(result, dict) else result
+        if not isinstance(items, list):
+            raise BrokerError("unexpected order history response")
+        return [item for item in items if isinstance(item, dict)]
+
 
 class Broker(Protocol):
     def place_market_order(
@@ -175,4 +207,8 @@ class Broker(Protocol):
     ) -> dict[str, Any]: ...
 
     def order(self, order_id: str | int) -> dict[str, Any]: ...
+
+    def order_history(
+        self, *, ticker: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
 

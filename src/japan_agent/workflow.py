@@ -49,6 +49,13 @@ class ProposalWorkflow:
                     f"research run {decision.research_run_id!r} is not recorded",
                 )
             ]
+        if run["assembled_at"] > now:
+            return [
+                RiskViolation(
+                    "EVIDENCE_FUTURE_RUN",
+                    "the cited research run claims to be assembled in the future",
+                )
+            ]
         if now - run["assembled_at"] > timedelta(hours=24):
             return [
                 RiskViolation(
@@ -104,7 +111,7 @@ class ProposalWorkflow:
         # Fetch a harmless superset. The pure risk engine applies the exact ISO-week boundary.
         submitted = self.database.submitted_trade_times(now - timedelta(days=7))
         duplicate = self.database.has_open_duplicate(
-            decision.instrument, decision.action.value
+            decision.instrument, decision.action.value, now=now
         )
         try:
             ticket = self.builder.build(

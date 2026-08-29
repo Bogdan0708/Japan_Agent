@@ -405,6 +405,7 @@ class Database:
         expected_hash: str,
         reason: str | None = None,
     ) -> StoredProposal:
+        expired = False
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -417,36 +418,56 @@ class Database:
             if row["ticket_hash"] != expected_hash:
                 raise ValueError("approval hash does not match immutable ticket")
             if parse_datetime(row["expires_at"]) <= now:
+                # Raising inside the context manager would roll this back, leaving
+                # the proposal PENDING forever; commit the EXPIRED write first.
                 connection.execute(
                     "UPDATE proposals SET status = 'EXPIRED' WHERE proposal_id = ?",
                     (proposal_id,),
                 )
-                raise ValueError("proposal has expired")
-            status = ProposalStatus.APPROVED if approve else ProposalStatus.REJECTED
-            connection.execute(
-                """
-                UPDATE proposals
-                   SET status = ?, approved_by = ?, approved_at = ?, rejection_reason = ?
-                 WHERE proposal_id = ?
-                """,
-                (status.value, approver, isoformat(now), reason, proposal_id),
-            )
+                expired = True
+            else:
+                status = ProposalStatus.APPROVED if approve else ProposalStatus.REJECTED
+                connection.execute(
+                    """
+                    UPDATE proposals
+                       SET status = ?, approved_by = ?, approved_at = ?, rejection_reason = ?
+                     WHERE proposal_id = ?
+                    """,
+                    (status.value, approver, isoformat(now), reason, proposal_id),
+                )
+        if expired:
+            raise ValueError("proposal has expired")
         stored = self.get_proposal(proposal_id)
         assert stored is not None
         return stored
 
-    def has_open_duplicate(self, ticker: str, side: str) -> bool:
-        pattern = f'%"side":"{side}"%'
-        ticker_pattern = f'%"ticker":"{ticker}"%'
+    def mark_expired(self, proposal_id: str) -> None:
+        """Retire a dead PENDING/APPROVED proposal; broker-touching states are untouchable."""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE proposals SET status = 'EXPIRED'
+                 WHERE proposal_id = ? AND status IN ('PENDING', 'APPROVED')
+                """,
+                (proposal_id,),
+            )
+
+    def has_open_duplicate(self, ticker: str, side: str, *, now: datetime) -> bool:
+        # PENDING/APPROVED proposals past their deadline are dead and must not
+        # block replacements; SUBMITTED/RECONCILIATION_REQUIRED always block
+        # because the broker may hold a live order. Matching must be exact:
+        # SQL LIKE would treat "_" in real T212 tickers as a wildcard.
         with self.connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM proposals
                  WHERE status IN ('PENDING', 'APPROVED', 'SUBMITTED', 'RECONCILIATION_REQUIRED')
-                   AND ticket_json LIKE ? AND ticket_json LIKE ?
+                   AND json_extract(ticket_json, '$.ticker') = ?
+                   AND json_extract(ticket_json, '$.side') = ?
+                   AND NOT (status IN ('PENDING', 'APPROVED') AND expires_at <= ?)
                  LIMIT 1
                 """,
-                (pattern, ticker_pattern),
+                (ticker, side, isoformat(now)),
             ).fetchone()
         return row is not None
 
@@ -509,7 +530,9 @@ class Database:
         error: str | None = None,
         proposal_status: ProposalStatus | None = None,
     ) -> None:
-        submitted_at = isoformat(now) if state == "SUBMITTED" else None
+        # The broker may hold a live order in any of these states, so they all
+        # count toward the weekly cap; COALESCE keeps the earliest timestamp.
+        submitted_at = isoformat(now) if state in {"SUBMITTED", "UNKNOWN", "FILLED"} else None
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
