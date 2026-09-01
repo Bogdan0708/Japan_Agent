@@ -1,5 +1,7 @@
 # Japan Tech Analyst
 
+[![CI](https://github.com/Bogdan0708/Japan_Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Bogdan0708/Japan_Agent/actions/workflows/ci.yml)
+
 Paper-first, human-approved research and execution infrastructure for a £100 Japan new-technology
 learning portfolio.
 
@@ -152,4 +154,3 @@ pages/          public-journal skeleton (no raw licensed data)
 Further details: [architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md),
 [compliance/live gate](docs/COMPLIANCE.md), and the dated
 [research archive](docs/research/README.md) (brokers, universe, legal, data, audit record).
-
