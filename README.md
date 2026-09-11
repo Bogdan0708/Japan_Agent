@@ -135,6 +135,24 @@ compromised, also revoke them in Trading 212; deleting a local file does not rev
 - The official TDnet API is paid. This project accepts timestamped output derived from the public
   disclosure pages; it does not pretend a free official API exists.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    Sources[Timestamped local sources] --> Snapshots[SQLite snapshots + heartbeats]
+    Snapshots --> Research[Paper-first Claude research]
+    Research --> Risk[Deterministic risk engine]
+    Risk --> Proposal[Immutable ticket + SHA-256 hash]
+    Proposal --> Telegram[Telegram human approval]
+    Telegram --> Preflight[Fresh quote + T212 portfolio preflight]
+    Preflight --> Broker[Broker adapter: one non-idempotent POST]
+    Broker --> Reconcile[Reconciliation state]
+    Reconcile --> Ledger[Hash-chained event ledger]
+    Ledger --> Journal[Redacted public journal]
+```
+
+Tests: `pytest` (see [Setup](#setup) for the zero-dependency `unittest discover` variant).
+
 ## Repository map
 
 ```text
