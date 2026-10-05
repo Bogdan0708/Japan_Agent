@@ -39,7 +39,7 @@ Ordering rule: **the forecast is committed before any execution or baseline pric
 |---|---|---|---|
 | 1 discover | `ingest/gamma.py` | Gamma `/events` (tags: geopolitics, politics, economics) → per-**child-market** eligibility → `markets` + immutable `rules_versions` | child market closed / not accepting orders / resolution already proposed or known (via resolution-state API); unmapped tags; missing rules text; non-binary; neg-risk (excluded in Phase 1); liquidity below floor; end date outside 2–90 days; outcome already effectively known (best ask ≥ 0.98 or ≤ 0.02 on either token) |
 | 2 research | `research/forecaster.py` | question + pinned `rules_version` + end date + today (**no price**) → `forecasts` (committed) | schema invalid, uncited/unfetched citations, budget exhausted |
-| 3 snapshot | `ingest/clob.py` | after forecast commit: CLOB `/book` for both tokens → `book_snapshots`; linked to the forecast as its baseline/execution snapshot | book older than 2 min at fetch, empty side, unparseable levels |
+| 3 snapshot | `ingest/clob.py` | after forecast commit: CLOB `/book` for both tokens → `book_snapshots`; linked to the forecast as its baseline/execution snapshot | book last-change time in the future (clock skew), empty or crossed side, unparseable levels |
 | 4 recheck + policy | `policy.py` (pure) | forecast + post-forecast snapshot + current rules/fees/eligibility + ledger state → decision or refusal | rules version changed since forecast, fee schedule missing, eligibility lost, see §5 |
 | 5 paper-fill | `paper.py` | decision + snapshot → ticket + cash debit in **one SQLite transaction** | insufficient depth |
 | 6 resolve | `ingest/resolution.py` | resolution-state API for **every forecasted market** (traded or not) → `resolutions`; settles tickets with credit in one transaction | status not final |
@@ -58,7 +58,7 @@ SQLite at `data/predict.sqlite3`; directories 0700, files 0600; schema-version t
 **Immutable artifacts** (content-addressed by SHA-256, never updated or deleted): `rules_versions` (full rules text, resolution source, end date as seen), `prompt_artifacts` (full prompt template text), `policy_artifacts` (full policy JSON content), `research_inputs` (exact rendered prompt sent), `tool_transcripts` (every model-visible tool call and result, see §6). Forecasts, tickets and cohorts reference artifacts by hash, so any result can be reconstructed even after config files change.
 
 - `markets`: condition_id (PK), yes/no token ids, event_id, question, current_rules_hash, category (from event tags), neg_risk, first_seen_at, last_seen_at. Mutable pointer; history lives in `rules_versions`.
-- `book_snapshots`: id, condition_id, token_id, observed_at (book's own ms timestamp → UTC), fetched_at, book_hash, bids/asks (Decimal-text levels, best-first), tick_size, min_order_size, fee_schedule (fees_enabled + fee_rate as served at that time), snapshot_hash.
+- `book_snapshots`: id, condition_id, token_id, observed_at (book's own ms timestamp → UTC; this is the book's **last-change** time), fetched_at, book_hash, bids/asks (Decimal-text levels, best-first), tick_size, min_order_size, fee_schedule (fees_enabled + fee_rate as served at that time), snapshot_hash.
 - `forecasts`: id, cohort_id, condition_id, rules_hash, kind (`entry`|`update`), created_at, abstained, abstain_reason, p_low/p_mid/p_high (Decimal in [0.01, 0.99], p_low ≤ p_mid ≤ p_high; null if abstained), confidence, base_rate, evidence + citations, rules_interpretation, research_input_hash, transcript_hash, exposure_flags, cost_usd, forecast_hash, baseline_snapshot_ids (set in stage 3; null + reason if the snapshot failed).
 - `stage_runs`: (cohort_id, condition_id, stage) → status, durable ids produced, attempted_at. Drives resume.
 - `paper_tickets`: id, cohort_id, forecast_id, snapshot_id, condition_id, outcome (YES/NO token bought), direction (`BUY`), shares, fills (per-level price × shares), fee (per-level sum), cost_total, policy_hash, rules_hash, status (`OPEN`|`SETTLED`), ticket_hash.
@@ -77,7 +77,7 @@ SQLite at `data/predict.sqlite3`; directories 0700, files 0600; schema-version t
 
 Pure functions, no I/O. Parameters in `config/predict-policy.json` — human-edited; code reads, never writes (example committed as `predict-policy.example.json`).
 
-Defaults: starting bankroll $1,000; min edge 0.05; min confidence `medium`; Kelly fraction 0.25; caps as % of **equity** — per market 2%, per event 5%, per category 15%, total open cost 50%; max slippage 2% above best ask; min time to close 48h; max book age 2 min.
+Defaults: starting bankroll $1,000; min edge 0.05; min confidence `medium`; Kelly fraction 0.25; caps as % of **equity** — per market 2%, per event 5%, per category 15%, total open cost 50%; max slippage 2% above best ask; min time to close 48h; max book age 2 min, measured from our `fetched_at` to the policy decision (the CLOB `timestamp` is the book's last-change time, not its freshness — verified 2026-10-05).
 
 **Equity** = available cash + cost basis of open tickets (cost basis, not mark-to-market, so sizing never depends on post-entry prices). Losses shrink equity, and therefore every cap and Kelly size.
 
