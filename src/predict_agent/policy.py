@@ -60,7 +60,7 @@ class PolicyInputs:
     forecast: ForecastView
     current_rules_hash: str
     eligible: bool  # in the latest completed discovery run
-    resolution_started: bool  # latest resolution observation is no longer `posed`
+    resolution_started: bool  # an observation's status is no longer open (resolution.OPEN_STATUSES)
     already_traded: bool  # this portfolio holds or held a ticket on the market
     books: Mapping[str, SideBook]  # "YES" and "NO"
     equity: Decimal

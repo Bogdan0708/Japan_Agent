@@ -22,6 +22,7 @@ from .fills import AskLevel
 from .forecasts import ResumeStep, resume_step, undecided_portfolios, unfinished_forecasts
 from .policy import Exposure, ForecastView, PolicyInputs, SideBook, Trade, decide
 from .policy_params import PolicyParams, policy_from_artifact
+from .resolution import OPEN_STATUSES
 from .tickets import TicketDraft, equity, open_ticket_locked, record_refusal_locked
 from .util import parse_datetime
 
@@ -131,10 +132,13 @@ def load_inputs(
         "SELECT 1 FROM discoveries WHERE run_id = ? AND condition_id = ?",
         (discovery, condition_id),
     ).fetchone() is not None
-    started = conn.execute(
-        "SELECT 1 FROM resolution_observations WHERE condition_id = ? AND status != 'posed'",
-        (condition_id,),
-    ).fetchone() is not None
+    started = any(
+        row["status"] not in OPEN_STATUSES
+        for row in conn.execute(
+            "SELECT status FROM resolution_observations WHERE condition_id = ?",
+            (condition_id,),
+        )
+    )
     traded = conn.execute(
         "SELECT 1 FROM paper_tickets WHERE portfolio_id = ? AND condition_id = ?",
         (portfolio_id, condition_id),

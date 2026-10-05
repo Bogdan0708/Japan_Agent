@@ -112,10 +112,45 @@ class TradeTests(PaperTestCase):
         )
         self.assertIn("discovery run", payload["detail"])
 
-    def test_resolution_started_and_rules_changed_refuse(self) -> None:
+    def test_open_statuses_initialized_and_active_do_not_refuse(self) -> None:
+        seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+        seed_observation(self.conn, None, status="initialized", cross_check="NOT_APPLICABLE",
+                        fetched_at=NOW + timedelta(seconds=10))
+        summary = trade_ready(self.conn, DECIDE_AT)
+        self.assertEqual((summary.traded, summary.refused), (2, {}))
+        seed_observation(self.conn, None, status="active", cross_check="NOT_APPLICABLE",
+                        fetched_at=NOW + timedelta(seconds=11))
+        summary = trade_ready(self.conn, DECIDE_AT)
+        self.assertEqual((summary.traded, summary.refused), (0, {}))
+
+    def test_resolution_started_refuses(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
         seed_observation(self.conn, "YES", fetched_at=NOW + timedelta(seconds=10))
         self.assertEqual(trade_ready(self.conn, DECIDE_AT).refused, {"RESOLUTION_STARTED": 2})
+
+    def test_rules_changed_since_the_forecast_refuses(self) -> None:
+        from predict_agent.util import canonical_json, sha256_json
+
+        seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+        # Insert a new rules version and update the market to point to it
+        new_payload = {
+            "question": "Will it happen?",
+            "rules_text": "Updated rules.",
+            "resolution_source": "",
+            "end_date": (NOW + timedelta(days=20)).isoformat(),
+        }
+        new_hash = sha256_json(new_payload)
+        updated_at = (NOW + timedelta(seconds=5)).isoformat()
+        self.conn.execute(
+            "INSERT INTO rules_versions (condition_id, rules_hash, rules_json, first_seen_at) "
+            "VALUES (?, ?, ?, ?)",
+            (CONDITION_ID, new_hash, canonical_json(new_payload), updated_at),
+        )
+        self.conn.execute(
+            "UPDATE markets SET current_rules_hash = ? WHERE condition_id = ?",
+            (new_hash, CONDITION_ID),
+        )
+        self.assertEqual(trade_ready(self.conn, DECIDE_AT).refused, {"RULES_CHANGED": 2})
 
     def test_a_late_decision_on_a_stale_book_refuses_and_is_final(self) -> None:
         forecast = seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
