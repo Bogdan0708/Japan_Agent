@@ -16,7 +16,8 @@ from predict_agent.db import connect
 from predict_agent.forecasts import ForecastError
 from predict_agent.settlement import PendingReason, payout_per_share, settle_open_tickets
 from predict_agent.tickets import open_ticket
-from tests.predict.fixtures import NOW
+from predict_agent.util import isoformat
+from tests.predict.fixtures import CONDITION_ID, NOW
 from tests.predict.ledger_fixtures import (
     portfolio,
     seed_baselined_forecast,
@@ -30,6 +31,7 @@ from tests.predict.ledger_fixtures import (
 LATER = NOW + timedelta(seconds=1)
 RESOLVED_AT = NOW + timedelta(days=20)
 SETTLE_AT = NOW + timedelta(days=30)
+D_HALF = Decimal("0.5")
 
 
 class SettlementTestCase(unittest.TestCase):
@@ -114,6 +116,44 @@ class SettleTests(SettlementTestCase):
         settle_open_tickets(self.conn, SETTLE_AT)
         self.assertEqual(Decimal(self.settlement(ticket)["net_pnl"]), Decimal("1"))
         self.assertEqual(available_cash(self.conn, self.primary), Decimal("1001"))
+
+    def test_half_on_the_yes_side_pays_half(self) -> None:
+        ticket = self.open_test_ticket("YES")
+        self.observe("HALF")
+        settle_open_tickets(self.conn, SETTLE_AT)
+        row = self.settlement(ticket)
+        self.assertEqual((row["outcome"], Decimal(row["payout_per_share"])), ("HALF", D_HALF))
+        self.assertEqual(Decimal(row["net_pnl"]), Decimal("1"))
+
+    def test_resolved_yes_that_gamma_contradicts_never_settles(self) -> None:
+        self.open_test_ticket("YES")
+        self.observe("YES", cross_check="MISMATCH")
+        summary = settle_open_tickets(self.conn, SETTLE_AT)
+        self.assertEqual((summary.settled, summary.count(PendingReason.UNSETTLEABLE)), (0, 1))
+
+    def legacy_observation(self, outcome: str, cross_check: str, minutes: float) -> None:
+        """A pre-v3 row: no resolution_requested_at, so its evidence is a point in time."""
+        at = isoformat(RESOLVED_AT + timedelta(minutes=minutes))
+        self.conn.execute(
+            "INSERT INTO resolution_observations (run_id, condition_id, "
+            "resolution_fetched_at, gamma_fetched_at, gamma_json, status, outcome, "
+            "cross_check, was_disputed, new_version_q, raw_json) "
+            "VALUES ('r', ?, ?, ?, '{}', 'resolved', ?, ?, 0, 0, '{}')",
+            (CONDITION_ID, at, at, outcome, cross_check),
+        )
+
+    def test_legacy_rows_govern_and_order_as_points(self) -> None:
+        self.open_test_ticket("YES")
+        self.legacy_observation("UNKNOWN", "MISMATCH", minutes=5)
+        self.legacy_observation("YES", "CONFIRMED", minutes=6)  # later point supersedes
+        self.assertEqual(settle_open_tickets(self.conn, SETTLE_AT).settled, 1)
+
+    def test_legacy_contradiction_inside_a_newer_poll_interval_waits(self) -> None:
+        self.open_test_ticket("YES")
+        self.observe("YES", minutes=7, requested_at=RESOLVED_AT + timedelta(minutes=6))
+        self.legacy_observation("UNKNOWN", "MISMATCH", minutes=6.5)
+        summary = settle_open_tickets(self.conn, SETTLE_AT)
+        self.assertEqual(summary.count(PendingReason.AMBIGUOUS_EVIDENCE), 1)
 
     def test_waiting_tickets_report_reason_and_age(self) -> None:
         cases = (
