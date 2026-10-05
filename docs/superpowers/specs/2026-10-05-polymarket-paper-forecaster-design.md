@@ -8,7 +8,7 @@ Date: 2026-10-05. Status: draft for review. Branch: `design/polymarket-paper-for
 
 **Assumptions.** The user is UK-resident. The paper-first, fail-closed, deterministic-money philosophy of the existing project carries over.
 
-**Success for Phase 1.** A forward-only record of blind Claude forecasts on real Polymarket markets, with paper trades simulated against real order books, settled at real resolutions, producing a report that lets the user judge: (a) is Claude better calibrated than the market, and (b) would trading on it have made money after fees and slippage.
+**Success for Phase 1.** A forward-only record of Claude forecasts made without the market price on real Polymarket markets, with paper trades simulated against real order books, settled at real resolutions, producing a report that lets the user judge: (a) is Claude better calibrated than the market, and (b) would trading on it have made money after fees and slippage.
 
 **Non-goals.** No real-money trading, no wallet/keys/signing, no execution code of any kind, no Telegram approval, no backtesting on historical markets, no public journal, no intraday/websocket trading, no changes to `src/japan_agent/`.
 
@@ -23,7 +23,7 @@ Date: 2026-10-05. Status: draft for review. Branch: `design/polymarket-paper-for
 - **UK-legal Phase 2 venues:** Betfair Exchange and Smarkets (active UKGC remote betting-intermediary licences, both with APIs).
 - **Documentation inconsistencies** to pin with contract tests: minimum order size described in shares (CLOB) vs USDC (Gamma market details); fees denominated in USDC vs settlement in pUSD.
 
-Independent prior analysis: `docs/POLYMARKET-PIVOT-PLAN.md` (untracked draft from another session). This spec adopts its correlated-exposure, unit-ambiguity, double-counted-spread, research-cost, probability-range/abstention, baseline, frozen-cohort and data-first-milestone points; it departs from it on package location (separate package, per the user's freeze decision) and category focus (per the user's choice).
+Independent prior analysis: `docs/POLYMARKET-PIVOT-PLAN.md` (untracked draft from another session). This spec adopts its correlated-exposure, unit-ambiguity, double-counted-spread, research-cost, probability-range/abstention, baseline, frozen-cohort and data-first-milestone points, and its subsequent review of commit `5a3c1b7` (forecast-before-price ordering, no voiding, cash ledger and restart, immutable artifacts, scoring population, enforceable tool isolation, sizing/fee/unit corrections, child-market eligibility and resolution-state settlement); it departs from it on package location (separate package, per the user's freeze decision) and category focus (per the user's choice).
 
 ## 3. Architecture
 
@@ -33,90 +33,105 @@ Run cadence: once daily from cron via `scripts/predict-daily.sh` (flock, atomic 
 
 ### Data flow
 
+Ordering rule: **the forecast is committed before any execution or baseline price is observed.** The book used for the paper fill and for the market baseline is always fetched after the forecast row is durably written, so a fill can never use a price that predates information Claude saw.
+
 | Stage | Module | Input → output | Fails closed on |
 |---|---|---|---|
-| 1 discover | `ingest/gamma.py` | Gamma `/events` filtered by tags (geopolitics, politics, economics) → `markets` | unmapped tags, missing rules text, non-binary, neg-risk (excluded in Phase 1), liquidity below floor, end date outside 2–90 days |
-| 2 snapshot | `ingest/clob.py` | CLOB `/book` per token → `book_snapshots` | book timestamp > 10 min old, empty side, unparseable levels |
-| 3 research | `research/forecaster.py` | question + rules + end date + today (**no price**) → `forecasts` | schema invalid, uncited/unfetched citations |
-| 4 policy | `policy.py` (pure) | forecast + snapshot + config + open positions → decision or refusal | see §5 |
-| 5 paper-fill | `paper.py` | decision + snapshot → `paper_tickets` + journal | insufficient depth |
-| 6 resolve | `ingest/resolution.py` | Gamma closed/resolved markets → `resolutions`, `settlements` | resolution not final, disputed |
+| 1 discover | `ingest/gamma.py` | Gamma `/events` (tags: geopolitics, politics, economics) → per-**child-market** eligibility → `markets` + immutable `rules_versions` | child market closed / not accepting orders / resolution already proposed or known (via resolution-state API); unmapped tags; missing rules text; non-binary; neg-risk (excluded in Phase 1); liquidity below floor; end date outside 2–90 days; outcome already effectively known (best ask ≥ 0.98 or ≤ 0.02 on either token) |
+| 2 research | `research/forecaster.py` | question + pinned `rules_version` + end date + today (**no price**) → `forecasts` (committed) | schema invalid, uncited/unfetched citations, budget exhausted |
+| 3 snapshot | `ingest/clob.py` | after forecast commit: CLOB `/book` for both tokens → `book_snapshots`; linked to the forecast as its baseline/execution snapshot | book older than 2 min at fetch, empty side, unparseable levels |
+| 4 recheck + policy | `policy.py` (pure) | forecast + post-forecast snapshot + current rules/fees/eligibility + ledger state → decision or refusal | rules version changed since forecast, fee schedule missing, eligibility lost, see §5 |
+| 5 paper-fill | `paper.py` | decision + snapshot → ticket + cash debit in **one SQLite transaction** | insufficient depth |
+| 6 resolve | `ingest/resolution.py` | resolution-state API for **every forecasted market** (traded or not) → `resolutions`; settles tickets with credit in one transaction | status not final |
 | 7 report | `report.py` | DB → Markdown + JSON in `data/reports/` | — |
 
-CLI: `predict-agent doctor | discover | snapshot | research | trade | resolve | report | run-daily`.
+CLI: `predict-agent doctor | discover | research | snapshot | trade | resolve | report | run-daily`.
 
-### Blind forecasting
+### Forecasting without the price
 
-Claude never receives the market price, order book, or volume. Rationale: a model that sees the price anchors to it; calibration would look good while measuring imitation. Blindness makes Claude-vs-market a genuine comparison.
+Claude is never given the market price, order book, or volume, and its tools are restricted to keep it from finding them (§6). Results are described as **"no detected price exposure"**, not as proven blind: detection is best-effort. Rationale: a model that sees the price anchors to it, so Claude-vs-market would measure imitation. (Price-aware model/crowd blends can forecast better — Halawi et al. 2024 — but Phase 1 deliberately tests Claude's independent signal.)
 
-## 4. Data model
+## 4. Data model and accounting
 
-SQLite at `data/predict.sqlite3`, journal at `journal/predict.jsonl`; both gitignored; directories 0700, files 0600. Schema version table from day one.
+SQLite at `data/predict.sqlite3`; directories 0700, files 0600; schema-version table from day one. The hash-chained journal is a **table inside the same database**, written in the same transaction as the state change it records; `journal/predict.jsonl` is an export, never the source of truth. (This avoids the existing project's open defect where state and ledger commit separately.)
 
-- `markets`: condition_id (PK), yes_token_id, no_token_id, event_id, question, rules_text, rules_hash, resolution_source, end_date (UTC), category (derived from event tags), fee_rate (Decimal text, nullable), fees_enabled, tick_size, min_order_size, first_seen_at, last_seen_at.
-- `book_snapshots`: id, token_id, observed_at (book timestamp), fetched_at, book_hash, bids/asks (JSON of Decimal-text levels, best-first), snapshot_hash.
-- `forecasts`: id, condition_id, created_at, cohort_id, abstained (bool), abstain_reason, p_low / p_mid / p_high (Decimal, p_low ≤ p_mid ≤ p_high; null when abstained), confidence (low/medium/high), base_rate, evidence (JSON with citations), rules_interpretation, model, prompt_version, inputs_hash, price_exposed (bool), research_cost_usd, kind (`entry` | `reforecast`), forecast_hash. **Every non-abstained forecast is scored on p_mid**, traded or not; abstentions are counted by reason.
-- `paper_tickets`: id, cohort_id, forecast_hash, snapshot_hash, condition_id, outcome (YES/NO token bought), direction (always BUY in Phase 1), shares, avg_price, fee, cost_total, policy_version, rules_hash, status (`OPEN`|`SETTLED`|`VOIDED`), ticket_hash, created_at. Immutable except status transition, which is journaled.
-- `resolutions`: condition_id, outcome (`YES`|`NO`|`HALF`), resolved_at, disputed (bool), raw_status.
-- `settlements`: ticket_id, payout, net_pnl, settled_at.
-- `refusals`: run_id, condition_id, stage, reason_code, detail, at.
-- `cohorts`: cohort_id, policy_hash (hash of `predict-policy.json`), prompt_version, model, started_at. Any change to policy config, prompt or model opens a new cohort; reports never pool cohorts silently.
+**Immutable artifacts** (content-addressed by SHA-256, never updated or deleted): `rules_versions` (full rules text, resolution source, end date as seen), `prompt_artifacts` (full prompt template text), `policy_artifacts` (full policy JSON content), `research_inputs` (exact rendered prompt sent), `tool_transcripts` (every model-visible tool call and result, see §6). Forecasts, tickets and cohorts reference artifacts by hash, so any result can be reconstructed even after config files change.
 
-State transitions: `OPEN → SETTLED` on final resolution (HALF pays $0.50/share). `OPEN → VOIDED` if the market is cancelled or its `rules_hash` changes after the ticket; voided tickets are excluded from P&L and journaled with the reason.
+- `markets`: condition_id (PK), yes/no token ids, event_id, question, current_rules_hash, category (from event tags), neg_risk, first_seen_at, last_seen_at. Mutable pointer; history lives in `rules_versions`.
+- `book_snapshots`: id, condition_id, token_id, observed_at (book's own ms timestamp → UTC), fetched_at, book_hash, bids/asks (Decimal-text levels, best-first), tick_size, min_order_size, fee_schedule (fees_enabled + fee_rate as served at that time), snapshot_hash.
+- `forecasts`: id, cohort_id, condition_id, rules_hash, kind (`entry`|`update`), created_at, abstained, abstain_reason, p_low/p_mid/p_high (Decimal in [0.01, 0.99], p_low ≤ p_mid ≤ p_high; null if abstained), confidence, base_rate, evidence + citations, rules_interpretation, research_input_hash, transcript_hash, exposure_flags, cost_usd, forecast_hash, baseline_snapshot_ids (set in stage 3; null + reason if the snapshot failed).
+- `stage_runs`: (cohort_id, condition_id, stage) → status, durable ids produced, attempted_at. Drives resume.
+- `paper_tickets`: id, cohort_id, forecast_id, snapshot_id, condition_id, outcome (YES/NO token bought), direction (`BUY`), shares, fills (per-level price × shares), fee (per-level sum), cost_total, policy_hash, rules_hash, status (`OPEN`|`SETTLED`), ticket_hash.
+- `cash_ledger`: cohort_id, entry_type (`FUNDING`|`DEBIT`|`CREDIT`), amount (Decimal), ref (ticket id), at, entry_hash. **Available cash = sum of entries; it can never go negative** (enforced in the transaction).
+- `resolutions`: condition_id, status (as served), payouts (as served), was_disputed, outcome (`YES`|`NO`|`HALF`|`CANCELLED`), resolved_at, rules_changed_since_first_forecast (bool).
+- `refusals`, `abstentions`: run_id, cohort_id, condition_id, stage, reason_code, detail, at.
+- `cohorts`: cohort_id, policy_hash, prompt_hash, model id (exact), research settings (tools, blocked domains, budgets), code_version (git commit SHA + dirty flag), scoring_version, starting_bankroll, started_at.
+
+**Cohorts.** A change to policy content, prompt content, model id, research settings, or scoring version opens a new cohort. Each cohort is an **independent virtual portfolio** with its own `FUNDING` entry (default $1,000) — no capital is inherited. The old cohort keeps settling its open tickets but takes no new entries. Reports never pool cohorts.
+
+**Ticket lifecycle.** `OPEN → SETTLED` only, settled from the official resolution: payout per share = the served payout for the held token (YES/NO → $1 or $0; `HALF` → $0.50). There is **no voiding**: a rules clarification never removes a position or its P&L. A market whose rules changed after the forecast is flagged (`rules_changed_since_first_forecast`) and may be excluded only from a clearly labelled *forecast-scoring* subset; its P&L always counts. `CANCELLED` is used only when the resolution API documents a cancellation, and its payout follows what is served. One entry per market per cohort, ever (no re-entry after settlement).
+
+**Settlement mapping.** Accepted final statuses and the payouts → outcome mapping are pinned by contract tests against recorded resolution-state responses (data milestone). An unknown status or payout vector → no settlement, surfaced in the report. `was_disputed=true` with a final status settles normally; disputes delay but never block settlement.
 
 ## 5. Paper policy
 
-Pure functions, no I/O. Parameters in `config/predict-policy.json` — human-edited; code reads, never writes (example file committed as `predict-policy.example.json`).
+Pure functions, no I/O. Parameters in `config/predict-policy.json` — human-edited; code reads, never writes (example committed as `predict-policy.example.json`).
 
-Defaults: bankroll $1,000; min edge 0.05; min confidence `medium`; Kelly fraction 0.25; per-market cap 2% of bankroll; **per-event cap 5%** (correlated markets under one event); per-category cap 15%; total open exposure cap 50%; max slippage 2% from best ask; min time to close 48h; max book age 10 min; forecast must be from the same run as the snapshot.
+Defaults: starting bankroll $1,000; min edge 0.05; min confidence `medium`; Kelly fraction 0.25; caps as % of **equity** — per market 2%, per event 5%, per category 15%, total open cost 50%; max slippage 2% above best ask; min time to close 48h; max book age 2 min.
 
-Algorithm for each candidate market:
-1. Refuse if the market already has an `OPEN` or `SETTLED` ticket (one entry per market, hold to resolution; no exits, adds or re-trades in Phase 1).
-2. Refuse if the forecast abstained, or if `fees_enabled` and `fee_rate` is null.
-3. For each side s ∈ {YES, NO} with **conservative** q_s = p_low (YES) or 1 − p_high (NO): compute target size by Kelly using best ask, walk the ask book for that size to get `avg_price`; per-share cost `c_s = avg_price + fee_rate × avg_price × (1 − avg_price)`. The walked average already includes spread/slippage — do not subtract spread again. Edge `e_s = q_s − c_s`. Using the conservative bound means an edge that vanishes under a modestly less confident estimate is never traded.
-4. Pick the side with larger edge; refuse if `e < min_edge`.
-5. Size: `f = 0.25 × (q − c)/(1 − c)` of bankroll (conservative q), then clamp by per-market, per-event, per-category and total caps (computed on cost of open tickets); convert to shares, round down to `tick_size` precision and enforce `min_order_size` (unit interpretation pinned by contract tests, §8). Re-walk the book at the final size; refuse if slippage > 2% or depth insufficient. Never fabricate a fill beyond recorded depth.
-6. Emit decision with all inputs' hashes; `paper.py` writes the immutable ticket.
+**Equity** = available cash + cost basis of open tickets (cost basis, not mark-to-market, so sizing never depends on post-entry prices). Losses shrink equity, and therefore every cap and Kelly size.
 
-Weekly re-forecasts of open markets are blind, scored, and never trade in Phase 1.
+Algorithm (per market, after the post-forecast snapshot):
+1. Refuse if: forecast abstained; rules version changed since the forecast; eligibility lost; this cohort already holds or held a ticket on this market; `fees_enabled` with no fee rate in the snapshot.
+2. Conservative probabilities: q_YES = p_low, q_NO = 1 − p_high. Per side, provisional edge at the best ask `a`: `q − a − fee(a)`; drop sides with edge < min_edge.
+3. **Size before depth:** budget `B = min(0.25 × Kelly(q, a) × equity, every cap's remaining headroom, available cash)`, where `Kelly(q, c) = (q − c)/(1 − c)`.
+4. Walk the ask book level by level spending at most `B`, including fees: each level's fee is `shares_at_level × fee_rate × price_level × (1 − price_level)` — **fees are summed per level, never computed at the average price**. Price levels respect `tick_size` (a price property); share quantity is rounded down to the venue's share precision (a quantity property, pinned by contract test). The walked prices already include spread and slippage; nothing is subtracted twice.
+5. Recompute realized per-share cost `c` (total cost / shares) and edge `q − c`; refuse if edge < min_edge, slippage > 2%, shares < `min_order_size` (unit pinned by contract test; if the unit cannot be determined, refuse), or depth is insufficient. Never fabricate fills beyond recorded depth.
+6. Pick the side with the larger realized edge (at most one side per market). Emit a decision referencing forecast, snapshot, policy, and rules hashes; `paper.py` writes ticket + `DEBIT` atomically.
+
+**About the range.** Claude's p_low/p_high have **no validated coverage**; the range is an unvalidated sensitivity check, not a confidence interval. The prompt elicits it explicitly as "the lowest and highest probability you would still find defensible given the evidence". Reports show results by range width. As a **pre-registered secondary analysis**, a shadow policy using p_mid instead of the bounds is run on the same post-forecast snapshots with its own virtual cash ledger (shadow tickets are labelled and never affect the primary portfolio). The primary policy is not changed based on results within a cohort.
+
+**Updates.** Weekly update forecasts on markets with open tickets are scored separately and never trade.
 
 ## 6. Research layer
 
-- Claude via the Agent SDK with **only** WebSearch and WebFetch tools; no filesystem, shell, DB, or policy/paper imports. Strict JSON output validated against a schema; invalid output → refusal, no retry within the run.
-- Prompt inputs: question, full rules text, resolution source, end date, today's UTC date. Prompt asks for a base rate, evidence for and against, interpretation of the rules, a probability range (p_low, p_mid, p_high), confidence, and permits explicit abstention with a reason (e.g. ambiguous rules, no relevant evidence).
-- **Leakage controls:** WebSearch `blocked_domains` includes polymarket.com, kalshi.com, betfair.com, smarkets.com, manifold.markets, metaculus.com, oddschecker.com, predictit.org and similar. Post-hoc scanner flags `price_exposed` when citations or reasoning contain odds/probability-of-market phrasing ("% chance", "odds", "traders give", "market prices", prediction-market names). Reports score flagged forecasts separately. This is mitigation, not elimination: news articles may quote odds.
-- Citations must be URLs actually fetched in the session (same principle as the existing citation validator).
-- Forward-only: forecasts are made before outcomes are known; no historical backtests (model training data contaminates resolved markets).
-- Budget: max 15 new entry forecasts/day, ranked by liquidity then nearest end date; per-forecast cost recorded; model and caps in config.
+- Claude via the Agent SDK, configured so the **available** tool set is exactly WebSearch + WebFetch: set the SDK's available-tools option (not just `allowed_tools`, which only auto-approves), `disallowed_tools` for everything else, `setting_sources=[]`, an explicit empty MCP server set, and a deny-by-default permission callback/hook. Note: the existing `japan_agent/research/claude.py` relies on `allowed_tools=[]`, which does not restrict tools; that pattern must not be copied. A startup self-check fails closed if the SDK reports any other tool available.
+- **Domain enforcement on both tools:** WebSearch `blocked_domains` and a PreToolUse hook that denies WebFetch for the same list (polymarket.com, kalshi.com, betfair.com, smarkets.com, manifold.markets, metaculus.com, oddschecker.com, predictit.org, and similar; list lives in the policy artifact).
+- **Exposure detection covers everything the model saw:** a PostToolUse hook records every tool result (search snippets included, cited or not) into `tool_transcripts`; the scanner runs over transcripts plus final reasoning for odds/market-probability phrasing and prediction-market names. Flags are stored per forecast; flagged forecasts are reported separately. Wording everywhere: "no detected price exposure".
+- Strict JSON schema; invalid output → abstention-like refusal recorded, no retry within the run. Citations must be URLs actually fetched in that session.
+- Forward-only; no historical backtests.
+- **Monetary budget:** daily and per-forecast USD caps from config, enforced from the SDK's reported cost, counting failed attempts and weekly updates. Volume cap of 15 new entry forecasts/day also applies. Budget exhausted → remaining markets refused with `BUDGET`.
 
-## 7. Error handling
+## 7. Error handling and restart
 
-- HTTP: only unauthenticated GETs. Bounded retries (3, exponential backoff, jitter) on timeouts/5xx/429, respecting published limits (Gamma `/markets` 300/10s, CLOB `/book` 1,500/10s). 4xx or malformed body → skip market with refusal record.
-- Stale/incomplete data → fail closed with a reason code; an empty shortlist is a valid outcome.
-- Resolution: settle only when Gamma reports closed and UMA resolution final; disputed markets wait. Markets > 14 days past end date and unresolved are surfaced in the report, never guessed.
-- Each run records `GET /api/geoblock` for audit. Phase 1 places no orders, so a blocked result does not stop the run. **No wallet, private key, signing or order-submission code exists in Phase 1.**
-- Same-day reruns are idempotent: a market already forecast/traded today is skipped.
+- HTTP: unauthenticated GETs only. Bounded retries (3, exponential backoff, jitter) on timeouts/5xx/429 within published limits (Gamma `/markets` 300/10s, CLOB `/book` 1,500/10s). 4xx or malformed body → refusal record.
+- Stale/incomplete data → fail closed with a reason code; an empty shortlist is valid.
+- **Resume, not skip.** Each run resumes per `(cohort, market, stage)` from `stage_runs` using durable ids: a committed forecast without a snapshot gets its snapshot; a forecast + snapshot without a decision gets a decision. If the snapshot step is reached too late (forecast older than a configured window, default 30 min), the forecast is kept for scoring with `NO_TIMELY_BASELINE` and does not trade — this prevents a crash-restart from trading on a stale forecast.
+- Resolution: polled for every forecasted market until final. Markets > 14 days past end date and unresolved are surfaced, never guessed.
+- Each run records `GET /api/geoblock` for audit. **No wallet, key, signing, or order-submission code exists in Phase 1.**
 
 ## 8. Reporting and testing
 
-**Report** (`predict-agent report`, local Markdown + JSON):
-- Sample size (resolved markets, independent events) first.
-- Brier and log score: Claude p_mid vs baselines at the same timestamp — market mid, and Claude's own stated base rate — overall and by category, horizon bucket, `price_exposed` split.
+**Scoring population (primary).** One row per market per cohort: the **first `entry` forecast**, non-abstained, with a baseline snapshot, on a market that reached a final `YES`/`NO` resolution. Claude p_mid, the market baseline (YES mid from the same post-forecast snapshot), and the base-rate baseline are scored **on exactly these rows**. Excluded and counted separately: abstentions (rate = abstained / forecast attempts), `HALF`/`CANCELLED` resolutions (reported, not Brier-scored), unresolved markets, `NO_TIMELY_BASELINE`, exposure-flagged forecasts (scored as a separate subset), rules-changed markets (forecast-scoring subset only; P&L unaffected). Log score uses probabilities clipped to [0.01, 0.99] for all three forecasters. Update forecasts are reported in a separate section.
+
+**Report** (`predict-agent report`, local Markdown + JSON, every section per cohort):
+- Counts first: eligible markets after each exclusion, forecasts, abstentions, resolved scoring rows, distinct events.
+- Brier and log score for Claude vs both baselines; by category, horizon, range width.
 - 10-bucket calibration table.
-- Paper P&L net of fees and slippage; **event-clustered** bootstrap 95% CI; hit rate; mean edge at entry vs realized; open capital locked; total research cost and P&L net of research cost.
-- Refusal and abstention counts by reason code.
-- Every section split by cohort.
-- Guidance (not a gate): expect a 4–8 week collection window, extended while independent resolved events are too few to read.
-- No automated go/no-go; the user decides on Phase 2.
+- Paper P&L from the cash ledger (fees and slippage included); bootstrap CI resampling **by event** — labelled as a heuristic, since one event id does not prove independence; hit rate; edge at entry vs realized; locked capital; research cost and P&L net of it.
+- Shadow p_mid policy results alongside, labelled secondary.
+- Guidance (not a gate): expect 4–8 weeks, extended while resolved events are few. No automated go/no-go.
 
 **Tests** (unittest, zero-network, `-W error::ResourceWarning`):
-- Policy tables: conservative-bound edge (range straddling the ask refuses), abstained forecast refuses, both sides, fees on/off, missing fee rate refuses, each cap including per-event, tick rounding, min order size under both unit interpretations, 48h cutoff, no-double-spread.
-- Book walk: multi-level fills, insufficient depth, worst-first input ordering.
-- Settlement: YES, NO, HALF, VOIDED on rules-hash change, disputed pending.
-- Ingest: fixtures shaped from verified live responses (JSON-in-string fields, null category, ms timestamps), plus stale and malformed variants.
-- Research: schema rejection, unfetched citations, leakage scanner.
-- Ledger: hash-chain integrity, ticket immutability.
-- Isolation: test asserts `predict_agent.research` imports nothing from `predict_agent.policy`/`paper`, and `predict_agent` imports nothing from `japan_agent`.
+- Ordering: snapshot/fill can only reference a snapshot fetched after the forecast commit.
+- Policy: worked example (q=0.80, ask 0.50, equity $1,000 → Kelly 300 shares, capped to 40, filled from a 50-share book); per-level fee example (20 @ 0.50 + 20 @ 0.51, rate 0.05 → 0.49990, not 0.49995); conservative bounds; abstention; each cap incl. per-event; equity shrinks after losses; cash never negative; tick vs share precision; min order size; rules-version change refuses; no re-entry.
+- Book walk: multi-level, insufficient depth, worst-first input.
+- Settlement: YES, NO, HALF, CANCELLED, disputed-then-final, unknown status → unsettled; rules change never removes P&L; ticket+debit and settlement+credit atomic (simulated failure mid-transaction leaves no partial state).
+- Restart: crash after forecast commit → resume snapshots, no duplicate forecast; late resume → `NO_TIMELY_BASELINE`.
+- Ingest/eligibility: recorded fixtures incl. closed child markets inside active events, JSON-in-string fields, null category, ms timestamps, stale/malformed variants.
+- Research: available-tool self-check, WebFetch domain denial, exposure detected in an uncited search snippet, schema rejection, budget enforcement incl. failed attempts.
+- Scoring: population rules above; baselines scored on identical rows.
+- Isolation: `predict_agent.research` imports nothing from `policy`/`paper`; `predict_agent` imports nothing from `japan_agent`.
 
 ## 9. Repository changes
 
@@ -124,16 +139,17 @@ Weekly re-forecasts of open markets are blind, scored, and never trade in Phase 
 - `pyproject.toml`: add package and `predict-agent` script.
 - `.gitignore`: `data/predict.sqlite3`, `journal/predict.jsonl`, `data/reports/`, `config/predict-policy.json`.
 - CI: add `bash -n scripts/predict-daily.sh`.
-- `CLAUDE.md`: add a `predict_agent` section — commands, "no execution code in Phase 1", "never circumvent geoblocking", blind-forecast rule, policy config is human-owned.
+- `CLAUDE.md`: add a `predict_agent` section — commands, "no execution code in Phase 1", "never circumvent geoblocking", no-price-input rule and research tool isolation, forecast-before-price ordering, policy config is human-owned.
 - `src/japan_agent/` untouched.
 
 ## 10. Build order
 
-1. **Data milestone** — discover, snapshot, refusals, `predict-agent report --shortlist` (eligible markets, books, fees). No Claude calls. Proves enough suitable markets exist before spending on research.
-2. Policy + paper fills + settlement on fixtures and recorded snapshots.
-3. Research layer (blind forecaster, leakage scanner, cohorts).
-4. Full report and `run-daily` cron wrapper.
+1. **Data milestone** — discover (child-market eligibility), resolution-state polling, post-hoc snapshots, refusals, `predict-agent report --shortlist`. No Claude calls. Acceptance: recorded fixtures for every API shape used (events with closed children, books, fee fields, resolution states incl. disputed and unknown); contract tests pinning share precision, min-order-size unit, fee-rate field and status/payout mapping; eligible-market counts reported after every exclusion; a permitted read-only smoke run compared against the live source.
+2. Ledger: cash, tickets, settlement, atomic transactions, artifacts, cohorts, restart.
+3. Policy + paper fills (incl. shadow p_mid policy) on recorded snapshots.
+4. Research layer (tool isolation, domain enforcement, transcripts, exposure scanner, budget).
+5. Full report and `run-daily` cron wrapper.
 
 ## 11. Phase 2 handoff (out of scope; separate spec)
 
-Venue: Betfair Exchange or Smarkets. Requires a human-maintained mapping `config/venue-markets.json` (Polymarket condition_id → venue market id; code reads, never writes). Reuses forecasts, policy and ticket hashing; reintroduces Telegram approval, non-idempotent order rules and reconciliation from the existing design. Gambling-licence terms, venue API terms and the user's tax position must be reviewed before any real money.
+Polymarket paper results **do not transfer** to another venue: prices, liquidity, commission and settlement terms must be evaluated on the destination venue itself, so Phase 2 begins with its own paper/data period there. Candidates: Betfair Exchange (verified 2026-10-05: £499 one-off live app-key activation; live keys may not be used read-only; delayed key free for development) and Smarkets (reported £150 setup fee and restrictions on data-only/benchmarking API use — **unverified**, terms page could not be fetched). Requires a human-maintained mapping `config/venue-markets.json` (code reads, never writes). Reuses forecasts and ticket hashing; reintroduces Telegram approval, non-idempotent order rules and reconciliation from the existing design. Gambling-licence terms, venue API terms and the user's tax position must be reviewed before any real money.
