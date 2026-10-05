@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS cohorts (
     started_at TEXT NOT NULL,
     closed_at TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_cohort ON cohorts (status) WHERE status = 'ACTIVE';
 CREATE TABLE IF NOT EXISTS portfolios (
     portfolio_id TEXT PRIMARY KEY,
     cohort_id TEXT NOT NULL REFERENCES cohorts (cohort_id),

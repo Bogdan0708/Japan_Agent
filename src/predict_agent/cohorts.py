@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import artifact_kind
-from .cash import LedgerError, append_cash_entry, money_text
+from .cash import LedgerError, append_cash_entry, money_text, parse_money
 from .db import append_journal, transaction
 from .util import canonical_json, isoformat, sha256_json
 
@@ -122,10 +122,16 @@ def ensure_cohort(
             if artifact_kind(conn, digest) != kind:
                 raise LedgerError(f"{kind} artifact {digest[:12]} is not stored")
         existing = conn.execute(
-            "SELECT status FROM cohorts WHERE cohort_id = ?", (cohort_id,)
+            "SELECT status, starting_bankroll FROM cohorts WHERE cohort_id = ?", (cohort_id,)
         ).fetchone()
         if existing is not None:
             if existing["status"] == "ACTIVE":
+                if parse_money(existing["starting_bankroll"]) != starting_bankroll:
+                    raise LedgerError(
+                        f"cohort {cohort_id[:12]} is active with starting bankroll "
+                        f"{existing['starting_bankroll']}; refusing a different bankroll "
+                        f"{money_text(starting_bankroll)}"
+                    )
                 return cohort_id
             raise LedgerError(
                 f"cohort {cohort_id[:12]} is closed; refusing to reopen it "

@@ -19,6 +19,7 @@ from predict_agent.cohorts import (
     ensure_cohort,
 )
 from predict_agent.db import connect
+from predict_agent.util import isoformat
 from tests.predict.fixtures import NOW
 
 REPO = Path(__file__).resolve().parents[2]
@@ -61,6 +62,22 @@ class CohortTests(unittest.TestCase):
             "SELECT COUNT(*) FROM cash_ledger WHERE entry_type = 'FUNDING'"
         ).fetchone()[0]
         self.assertEqual(fundings, 2)
+
+    def test_active_identity_with_a_different_bankroll_is_refused(self) -> None:
+        cohort = self.open(self.identity)
+        self.assertEqual(self.open(self.identity, "1000.00"), cohort)
+        with self.assertRaisesRegex(LedgerError, "bankroll"):
+            self.open(self.identity, "2000")
+
+    def test_second_active_cohort_is_rejected_by_the_database(self) -> None:
+        self.open(self.identity)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "INSERT INTO cohorts (cohort_id, identity_json, code_version, "
+                "starting_bankroll, baseline_window_seconds, status, started_at) "
+                "VALUES ('x', '{}', 'v', '1', 1, 'ACTIVE', ?)",
+                (isoformat(NOW),),
+            )
 
     def test_every_identity_field_changes_the_cohort(self) -> None:
         other_prompt = store_artifact(self.conn, "prompt", "Forecast v2.", NOW)
