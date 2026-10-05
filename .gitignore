@@ -16,3 +16,8 @@ journal/*.jsonl
 docs/consent/
 
 .claude/skills/
+
+# predict_agent runtime state (human-owned policy is never committed)
+data/predict.sqlite3*
+data/reports/
+config/predict-policy.json

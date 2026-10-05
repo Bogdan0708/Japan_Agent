@@ -1,0 +1,16 @@
+{
+  "discovery": {
+    "tag_categories": [
+      ["geopolitics", "geopolitics"],
+      ["economics", "economics"],
+      ["politics", "politics"]
+    ],
+    "min_liquidity": "5000",
+    "min_days_to_end": 2,
+    "max_days_to_end": 90,
+    "known_outcome_threshold": "0.98",
+    "max_book_age_seconds": 120,
+    "page_size": 100,
+    "max_pages": 60
+  }
+}

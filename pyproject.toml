@@ -19,6 +19,7 @@ dev = ["pytest>=8.0", "ruff>=0.9", "mypy>=1.14"]
 
 [project.scripts]
 japan-agent = "japan_agent.cli:main"
+predict-agent = "predict_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -37,5 +38,5 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["japan_agent"]
+packages = ["japan_agent", "predict_agent"]
 
