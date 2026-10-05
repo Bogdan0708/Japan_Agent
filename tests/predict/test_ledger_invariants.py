@@ -57,7 +57,7 @@ class InvariantTests(unittest.TestCase):
                 self.forecast,
                 yes,
                 fills=(Fill(Decimal("0.40"), Decimal("10")),),
-                fee=Decimal("0.02"),
+                fee=Decimal("0"),  # the snapshot is fee-free
             ),
             LATER,
         )
