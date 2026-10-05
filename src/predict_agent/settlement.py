@@ -1,11 +1,13 @@
 """Settle open paper tickets from official resolutions (spec §4). There is no voiding.
 
 The governing observation for a market is chosen inside the settlement transaction, by
-observation time, not insertion order: the one whose resolution fetch finished last.
-Each observation covers the interval [resolution_requested_at, resolution_fetched_at];
-if any observation with different evidence (status, outcome, cross-check) overlaps the
-governing one, the order is ambiguous and the ticket waits. Only a governing observation
-that is resolved, CONFIRMED against Gamma and maps to YES/NO/HALF settles."""
+observation time, not insertion order. An observation's evidence (status, outcome,
+cross-check) is gathered over [resolution_requested_at, latest of resolution_fetched_at
+and gamma_fetched_at]: the cross-check depends on the Gamma fetch, which finishes after
+the resolution fetch. The governing observation is the one whose evidence finished last;
+among ties, the one that started last. If any observation with different evidence
+overlaps the governing one, the order is ambiguous and the ticket waits. Only a governing
+observation that is resolved, CONFIRMED against Gamma and maps to YES/NO/HALF settles."""
 
 from __future__ import annotations
 
@@ -65,23 +67,33 @@ def _evidence(row: sqlite3.Row) -> tuple[str, str | None, str]:
 
 
 def _interval(row: sqlite3.Row) -> tuple[datetime, datetime]:
+    """When this observation's evidence was gathered: from the resolution request to the
+    later of the resolution and Gamma fetches."""
     end = parse_datetime(row["resolution_fetched_at"])
+    if row["gamma_fetched_at"] is not None:
+        end = max(end, parse_datetime(row["gamma_fetched_at"]))
     requested = row["resolution_requested_at"]
-    # Rows from before schema v3 carry no request time and are treated as instantaneous.
-    return (end if requested is None else parse_datetime(requested)), end
+    # Rows from before schema v3 carry no request time; their evidence starts at the
+    # resolution fetch.
+    start = parse_datetime(row["resolution_fetched_at"] if requested is None else requested)
+    return start, end
 
 
 def governing_observation(
     rows: Sequence[sqlite3.Row],
 ) -> tuple[sqlite3.Row | None, bool]:
-    """(governing observation, ambiguous). None when there are no observations."""
+    """(governing observation, ambiguous). None when there are no observations.
+
+    Governing: the latest evidence end; among ties, the latest start, then the lowest id,
+    so the result never depends on insertion order. An observation that began after a
+    contradiction ended supersedes it."""
     if not rows:
         return None, False
     latest_end = max(_interval(row)[1] for row in rows)
     candidates = [row for row in rows if _interval(row)[1] == latest_end]
-    governing = candidates[0]
     if len({_evidence(row) for row in candidates}) > 1:
-        return governing, True
+        return min(candidates, key=lambda row: row["id"]), True
+    governing = min(candidates, key=lambda row: (-_interval(row)[0].timestamp(), row["id"]))
     start = _interval(governing)[0]
     for row in rows:
         if _evidence(row) != _evidence(governing) and _interval(row)[1] >= start:

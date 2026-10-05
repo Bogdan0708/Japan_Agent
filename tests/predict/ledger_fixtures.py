@@ -89,9 +89,11 @@ def seed_observation(
     condition_id: str = CONDITION_ID,
     fetched_at: datetime = NOW,
     requested_at: datetime | None = None,
+    gamma_fetched_at: datetime | None = None,
 ) -> int:
     """An observation whose resolution request ran over [requested_at, fetched_at]
-    (default: one second before fetched_at)."""
+    (default: one second before fetched_at), cross-checked against Gamma fetched at
+    gamma_fetched_at (default: fetched_at)."""
     requested = requested_at or fetched_at - timedelta(seconds=1)
     cursor = conn.execute(
         "INSERT INTO resolution_observations (run_id, condition_id, resolution_requested_at, "
@@ -102,7 +104,7 @@ def seed_observation(
             condition_id,
             isoformat(requested),
             isoformat(fetched_at),
-            isoformat(fetched_at),
+            isoformat(gamma_fetched_at or fetched_at),
             status,
             outcome,
             cross_check,

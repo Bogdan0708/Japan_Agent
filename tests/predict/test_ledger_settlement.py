@@ -167,6 +167,50 @@ class SettleTests(SettlementTestCase):
         self.observe("YES", minutes=40)  # a later, non-overlapping confirmation settles
         self.assertEqual(settle_open_tickets(self.conn, SETTLE_AT).settled, 1)
 
+    def test_contradiction_from_a_later_gamma_cross_check_waits(self) -> None:
+        # A slow poll fetched resolutions at 0:01 but finished its Gamma cross-check at
+        # 10:00 (MISMATCH); a fast poll ran 2:00..2:02 (CONFIRMED). The cross-check is part
+        # of the evidence, so the slow poll overlaps the fast one and nothing settles.
+        self.open_test_ticket("YES")
+        seed_observation(
+            self.conn,
+            "UNKNOWN",
+            cross_check="MISMATCH",
+            requested_at=RESOLVED_AT,
+            fetched_at=RESOLVED_AT + timedelta(seconds=1),
+            gamma_fetched_at=RESOLVED_AT + timedelta(minutes=10),
+        )
+        seed_observation(
+            self.conn,
+            "YES",
+            requested_at=RESOLVED_AT + timedelta(minutes=2),
+            fetched_at=RESOLVED_AT + timedelta(minutes=2, seconds=1),
+            gamma_fetched_at=RESOLVED_AT + timedelta(minutes=2, seconds=2),
+        )
+        summary = settle_open_tickets(self.conn, SETTLE_AT)
+        self.assertEqual((summary.settled, summary.count(PendingReason.AMBIGUOUS_EVIDENCE)), (0, 1))
+        self.assertEqual(available_cash(self.conn, self.primary), Decimal("996"))
+        self.observe("YES", minutes=40)  # a later, non-overlapping confirmation settles
+        self.assertEqual(settle_open_tickets(self.conn, SETTLE_AT).settled, 1)
+
+    def test_tied_agreeing_observations_decide_the_same_in_any_insertion_order(self) -> None:
+        # Two CONFIRMED YES polls finish together at +10; one started at 0 (overlapping a
+        # MISMATCH that finished at +5), the other at +9 (after it). The poll that began
+        # after the contradiction ended supersedes it, whichever row was inserted first.
+        for order in ("early-first", "late-first"):
+            with self.subTest(order=order):
+                self.tearDown()
+                self.setUp()
+                self.open_test_ticket("YES")
+                self.observe("UNKNOWN", minutes=5, cross_check="MISMATCH",
+                             requested_at=RESOLVED_AT + timedelta(minutes=4))
+                starts = [RESOLVED_AT, RESOLVED_AT + timedelta(minutes=9)]
+                if order == "late-first":
+                    starts.reverse()
+                for start in starts:
+                    self.observe("YES", minutes=10, requested_at=start)
+                self.assertEqual(settle_open_tickets(self.conn, SETTLE_AT).settled, 1)
+
     def test_superseding_observation_committed_before_settlement_wins(self) -> None:
         # Another process records a newer MISMATCH just before settlement takes its lock:
         # the governing observation must be read inside the settlement transaction.
