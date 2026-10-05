@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import timedelta
 from decimal import Decimal
 
@@ -274,15 +275,83 @@ def _decision_problems(conn: sqlite3.Connection) -> list[str]:
     return problems
 
 
-def verify_ledger(conn: sqlite3.Connection) -> list[str]:
-    problems = _trigger_problems(conn) + _artifact_problems(conn)
-    for cohort in conn.execute("SELECT * FROM cohorts ORDER BY started_at").fetchall():
-        problems += _cohort_problems(conn, cohort)
-    for portfolio in conn.execute("SELECT * FROM portfolios ORDER BY portfolio_id").fetchall():
-        problems += _cash_problems(conn, portfolio)
-    for forecast in conn.execute("SELECT * FROM forecasts ORDER BY forecast_id").fetchall():
-        problems += _forecast_problems(conn, forecast)
-    for ticket in conn.execute("SELECT * FROM paper_tickets ORDER BY ticket_id").fetchall():
-        problems += _ticket_problems(conn, ticket)
-    problems += _decision_problems(conn)
+def _unreadable(label: str, error: Exception) -> list[str]:
+    return [f"{label}: unreadable ({type(error).__name__}: {error})"]
+
+
+def _guarded(label: str, check: Callable[[], list[str]]) -> list[str]:
+    """Run one check; corrupt data becomes a problem line instead of an exception."""
+    try:
+        return check()
+    except Exception as error:
+        return _unreadable(label, error)
+
+
+def _active_cohort_problems(conn: sqlite3.Connection) -> list[str]:
+    count = conn.execute("SELECT COUNT(*) FROM cohorts WHERE status = 'ACTIVE'").fetchone()[0]
+    return ["more than one ACTIVE cohort"] if count > 1 else []
+
+
+def _each(
+    conn: sqlite3.Connection,
+    query: str,
+    prefix: str,
+    key: str,
+    check: Callable[[sqlite3.Connection, sqlite3.Row], list[str]],
+) -> list[str]:
+    try:
+        rows = conn.execute(query).fetchall()
+    except Exception as error:
+        return _unreadable(f"{prefix}s", error)
+    problems: list[str] = []
+    for row in rows:
+        label = f"{prefix} {str(row[key])[:12]}"
+        problems += _guarded(label, lambda row=row: check(conn, row))  # type: ignore[misc]
     return problems
+
+
+def _verify(conn: sqlite3.Connection) -> list[str]:
+    problems = _guarded("triggers", lambda: _trigger_problems(conn))
+    problems += _guarded("artifacts", lambda: _artifact_problems(conn))
+    problems += _guarded("cohorts", lambda: _active_cohort_problems(conn))
+    problems += _each(
+        conn, "SELECT * FROM cohorts ORDER BY started_at", "cohort", "cohort_id", _cohort_problems
+    )
+    problems += _each(
+        conn,
+        "SELECT * FROM portfolios ORDER BY portfolio_id",
+        "portfolio",
+        "portfolio_id",
+        _cash_problems,
+    )
+    problems += _each(
+        conn,
+        "SELECT * FROM forecasts ORDER BY forecast_id",
+        "forecast",
+        "forecast_id",
+        _forecast_problems,
+    )
+    problems += _each(
+        conn,
+        "SELECT * FROM paper_tickets ORDER BY ticket_id",
+        "ticket",
+        "ticket_id",
+        _ticket_problems,
+    )
+    problems += _guarded("decisions", lambda: _decision_problems(conn))
+    return problems
+
+
+def verify_ledger(conn: sqlite3.Connection) -> list[str]:
+    """All ledger problems, read in one consistent snapshot. Never raises on bad data:
+    an unreadable record is reported as a problem and checking continues."""
+    owns_transaction = not conn.in_transaction
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN")
+        return _verify(conn)
+    except Exception as error:
+        return _unreadable("ledger", error)
+    finally:
+        if owns_transaction and conn.in_transaction:
+            conn.execute("ROLLBACK")

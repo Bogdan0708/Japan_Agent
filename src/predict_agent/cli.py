@@ -89,10 +89,10 @@ def main(
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)
+            print(f"policy {policy_hash[:12]} ok; journal chain {'ok' if journal_ok else 'BROKEN'}")
             problems = verify_ledger(conn)
         finally:
             conn.close()
-        print(f"policy {policy_hash[:12]} ok; journal chain {'ok' if journal_ok else 'BROKEN'}")
         for problem in problems:
             print(f"ledger: {problem}")
         print(f"ledger: {'ok' if not problems else f'{len(problems)} problem(s)'}")

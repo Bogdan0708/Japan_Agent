@@ -203,6 +203,41 @@ class InvariantTests(unittest.TestCase):
         )
         self.assert_problem("outside the baseline window")
 
+    def test_two_active_cohorts_are_reported(self) -> None:
+        self.conn.execute("DROP INDEX one_active_cohort")
+        self.conn.execute("DROP TRIGGER cohorts_active_to_closed_only")
+        seed_cohort(self.conn, model_id="m2")
+        self.conn.execute("UPDATE cohorts SET status = 'ACTIVE', closed_at = NULL")
+        self.assert_problem("more than one ACTIVE cohort")
+
+    def corrupt_funding(self) -> None:
+        self.conn.execute("DROP TRIGGER cash_no_update")
+        self.conn.execute("UPDATE cash_ledger SET amount = 'abc' WHERE entry_type = 'FUNDING'")
+
+    def test_verify_ledger_reports_unreadable_rows_instead_of_raising(self) -> None:
+        self.corrupt_funding()
+        problems = verify_ledger(self.conn)
+        self.assertTrue(any("missing immutability trigger cash_no_update" in p for p in problems))
+        self.assertTrue(any("unreadable" in p for p in problems), problems)
+        self.conn.execute("DROP TRIGGER cohorts_active_to_closed_only")
+        self.conn.execute("UPDATE cohorts SET identity_json = '{not json'")
+        problems = verify_ledger(self.conn)
+        self.assertTrue(any(p.startswith("cohort") and "unreadable" in p for p in problems))
+
+    def test_verify_ledger_leaves_no_transaction_open(self) -> None:
+        verify_ledger(self.conn)
+        self.assertFalse(self.conn.in_transaction)
+        self.corrupt_funding()
+        verify_ledger(self.conn)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_doctor_reports_unreadable_rows_and_still_prints_the_journal_line(self) -> None:
+        self.corrupt_funding()
+        code, output = self.run_cli(["doctor"])
+        self.assertEqual(code, 3, output)
+        self.assertIn("journal chain", output)
+        self.assertIn("unreadable", output)
+
     # Commands.
 
     def test_settle_command_runs_offline_and_reports_pending_age(self) -> None:
