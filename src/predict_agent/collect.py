@@ -314,10 +314,12 @@ def poll_resolutions(
     """Observe resolution state for every tracked market, cross-check against Gamma, and
     refresh each market's rules from the same Gamma response (clarifications often arrive
     after a market has left discovery). Both source responses and their retrieval times are
-    stored with the observation."""
+    stored with the observation, plus the time the resolution request started, so
+    settlement can tell overlapping polls apart."""
     ids = [r["condition_id"] for r in conn.execute("SELECT condition_id FROM markets ORDER BY 1")]
     if not ids:
         return 0
+    resolution_requested_at = now_fn()
     rows = fetch_resolutions(client, ids)
     resolution_fetched_at = now_fn()
     gamma = fetch_gamma_markets(client, ids)
@@ -360,8 +362,8 @@ def poll_resolutions(
             conn.execute(
                 "INSERT INTO resolution_observations (run_id, condition_id, "
                 "resolution_fetched_at, gamma_fetched_at, gamma_json, status, outcome, "
-                "cross_check, was_disputed, new_version_q, raw_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "cross_check, was_disputed, new_version_q, raw_json, resolution_requested_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     condition_id,
@@ -374,6 +376,7 @@ def poll_resolutions(
                     int(state.was_disputed),
                     int(state.new_version_q),
                     canonical_json(state.raw),
+                    isoformat(resolution_requested_at),
                 ),
             )
             if outcome == "UNKNOWN":

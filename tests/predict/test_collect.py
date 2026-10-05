@@ -320,7 +320,7 @@ class CorrectionPassCollectTests(CollectTestCase):
 
     def test_resolution_observation_retains_gamma_evidence_and_times(self) -> None:
         self.discover_one(self.run_id)
-        times = iter([NOW, NOW + timedelta(seconds=5)])
+        times = iter([NOW - timedelta(seconds=2), NOW, NOW + timedelta(seconds=5)])
         closed = gamma_market(closed=True, outcomePrices='["0", "1"]')
         poll = RoutedOpener(
             {
@@ -331,6 +331,7 @@ class CorrectionPassCollectTests(CollectTestCase):
         poll_resolutions(self.conn, self.client(poll), self.run_id, lambda: next(times))
         row = self.conn.execute("SELECT * FROM resolution_observations").fetchone()
         self.assertEqual(json.loads(row["gamma_json"])["outcomePrices"], '["0", "1"]')
+        self.assertEqual(row["resolution_requested_at"], "2026-10-05T11:59:58Z")
         self.assertEqual(row["resolution_fetched_at"], "2026-10-05T12:00:00Z")
         self.assertEqual(row["gamma_fetched_at"], "2026-10-05T12:00:05Z")
         self.assertEqual(row["cross_check"], "CONFIRMED")

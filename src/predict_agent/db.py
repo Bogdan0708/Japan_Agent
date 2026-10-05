@@ -9,9 +9,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .ledger_schema import LEDGER_SCHEMA
 from .util import canonical_json, isoformat, sha256_json
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Statements that bring an older version's existing tables up to date. CREATE ... IF NOT
+# EXISTS in SCHEMA and LEDGER_SCHEMA adds the new tables.
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: ("ALTER TABLE resolution_observations ADD COLUMN resolution_requested_at TEXT",),
+}
 GENESIS_HASH = "0" * 64
 
 SCHEMA = """
@@ -87,7 +93,8 @@ CREATE TABLE IF NOT EXISTS resolution_observations (
         CHECK (cross_check IN ('CONFIRMED', 'UNCHECKED', 'MISMATCH', 'NOT_APPLICABLE')),
     was_disputed INTEGER NOT NULL,
     new_version_q INTEGER NOT NULL,
-    raw_json TEXT NOT NULL
+    raw_json TEXT NOT NULL,
+    resolution_requested_at TEXT
 );
 CREATE TABLE IF NOT EXISTS refusals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,7 +134,40 @@ BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
 """
 
 
+def _statements(script: str) -> list[str]:
+    """Split a DDL script into statements; trigger bodies contain inner semicolons."""
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        raise RuntimeError("schema script ends with an incomplete statement")
+    return statements
+
+
+def _stored_version(conn: sqlite3.Connection) -> int | None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ).fetchone()
+    if table is None:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'").fetchone():
+            raise RuntimeError("predict database has tables but no schema version")
+        return None
+    versions = [row["version"] for row in conn.execute("SELECT version FROM schema_version")]
+    if not versions:
+        raise RuntimeError("predict database has an empty schema_version table")
+    if len(versions) != 1:
+        raise RuntimeError(f"unsupported predict schema version {versions}")
+    version: int = versions[0]
+    return version
+
+
 def connect(path: Path) -> sqlite3.Connection:
+    """Open the database. Creation and migration run in one transaction after the stored
+    version is checked, so a refused or failed migration leaves the file unchanged."""
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     if not path.exists():
@@ -136,12 +176,22 @@ def connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         conn.row_factory = sqlite3.Row
-        conn.executescript(SCHEMA)
-        rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        if not rows:
-            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-        elif [row["version"] for row in rows] != [SCHEMA_VERSION]:
-            raise RuntimeError(f"unsupported predict schema version {rows[0]['version']}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        with transaction(conn):
+            version = _stored_version(conn)
+            if version != SCHEMA_VERSION:
+                if version is not None and version not in MIGRATIONS:
+                    raise RuntimeError(f"unsupported predict schema version {version}")
+                for statement in _statements(SCHEMA + LEDGER_SCHEMA):
+                    conn.execute(statement)
+                if version is None:
+                    conn.execute(
+                        "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+                    )
+                else:
+                    for statement in MIGRATIONS[version]:
+                        conn.execute(statement)
+                    conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     except BaseException:
         conn.close()
         raise
