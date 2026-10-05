@@ -2830,3 +2830,10 @@ git commit -m "fix(predict): unreadable journal entries are a broken chain; sett
 3. **Type consistency:** `PolicyParams`, `SideBook`, `ForecastView`, `Exposure`, `PolicyInputs`, `Trade`, `Refusal`, `Walk`, `AskLevel`, `DecisionResult`, `TradeSummary` names match across tasks and fixtures; `Fill` is Plan 2's `tickets.Fill`.
 4. **Task order:** each task's tests import only modules from earlier tasks and Plan 1–2; verified by committing the tasks in order and running the full suite after each.
 5. **Review Focus:** six items above, each pinned to a named test in its owning task.
+
+## Post-implementation amendments (2026-10-06)
+
+- (a) Ruling 5 amended: "resolution started" means any observation whose status is not in `resolution.OPEN_STATUSES` (Plan 1's open set `initialized`/`posed`/`active`), not "no longer posed". Regression tests: `test_open_statuses_initialized_and_active_do_not_refuse`, `test_rules_changed_since_the_forecast_refuses`.
+- (b) Ruling 9 clarified: when both sides refuse, the reported code is the first refusal that is not `NO_EDGE`, YES checked first; both sides' reasons are in the detail.
+- (c) The fill invariant also rejects zero- or negative-share fills.
+- (d) The RESOLUTION_STARTED detail text is "a resolution observation is no longer open".
