@@ -287,6 +287,15 @@ def _guarded(label: str, check: Callable[[], list[str]]) -> list[str]:
         return _unreadable(label, error)
 
 
+def _foreign_key_problems(conn: sqlite3.Connection) -> list[str]:
+    """Rows whose references point nowhere (e.g. written with foreign keys off). The
+    per-record checks start from existing parents, so they cannot see orphans."""
+    return [
+        f"foreign key violation: {row[0]} rowid {row[1]} references missing {row[2]}"
+        for row in conn.execute("PRAGMA foreign_key_check").fetchall()
+    ]
+
+
 def _active_cohort_problems(conn: sqlite3.Connection) -> list[str]:
     count = conn.execute("SELECT COUNT(*) FROM cohorts WHERE status = 'ACTIVE'").fetchone()[0]
     return ["more than one ACTIVE cohort"] if count > 1 else []
@@ -313,6 +322,7 @@ def _each(
 def _verify(conn: sqlite3.Connection) -> list[str]:
     problems = _guarded("triggers", lambda: _trigger_problems(conn))
     problems += _guarded("artifacts", lambda: _artifact_problems(conn))
+    problems += _guarded("foreign keys", lambda: _foreign_key_problems(conn))
     problems += _guarded("cohorts", lambda: _active_cohort_problems(conn))
     problems += _each(
         conn, "SELECT * FROM cohorts ORDER BY started_at", "cohort", "cohort_id", _cohort_problems

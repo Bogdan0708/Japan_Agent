@@ -238,6 +238,25 @@ class InvariantTests(unittest.TestCase):
         self.assertIn("journal chain", output)
         self.assertIn("unreadable", output)
 
+    def test_orphan_cash_entry_is_detected(self) -> None:
+        # Written with foreign keys off, as a corrupting tool might; no trigger is removed.
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.append_raw_cash("no-such-portfolio", "FUNDING", "1000", None)
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.assert_problem("foreign key violation: cash_ledger")
+
+    def test_orphan_decision_is_detected(self) -> None:
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute(
+            "INSERT INTO decisions (portfolio_id, forecast_id, condition_id, kind, reason, "
+            "ticket_id, decided_at) VALUES ('ghost', 999, 'c', 'REFUSED', 'x', NULL, ?)",
+            (isoformat(LATER),),
+        )
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        problems = verify_ledger(self.conn)
+        violations = [p for p in problems if p.startswith("foreign key violation: decisions")]
+        self.assertEqual(len(violations), 2, problems)  # missing portfolio and forecast
+
     # Commands.
 
     def test_settle_command_runs_offline_and_reports_pending_age(self) -> None:
