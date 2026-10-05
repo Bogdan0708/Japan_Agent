@@ -17,6 +17,7 @@ from predict_agent.forecasts import (
     record_forecast,
     start_attempt,
 )
+from predict_agent.tickets import Fill, TicketDraft
 from predict_agent.util import canonical_json, isoformat, sha256_json
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN
 
@@ -200,3 +201,33 @@ def seed_baselined_forecast(
     no = seed_snapshot(conn, "NO", later, condition_id)
     attach_baseline(conn, forecast, yes, no, later)
     return forecast, yes, no
+
+
+def ticket_draft(
+    conn: sqlite3.Connection,
+    portfolio_id: str,
+    forecast_id: int,
+    snapshot_id: int,
+    *,
+    outcome: str = "YES",
+    fills: tuple[Fill, ...] = (Fill(Decimal("0.40"), Decimal("10")),),
+    fee: Decimal = Decimal("0"),
+) -> TicketDraft:
+    """A draft that satisfies every ledger check, using the portfolio's own policy."""
+    forecast = conn.execute(
+        "SELECT condition_id, rules_hash FROM forecasts WHERE forecast_id = ?", (forecast_id,)
+    ).fetchone()
+    policy = conn.execute(
+        "SELECT policy_hash FROM portfolios WHERE portfolio_id = ?", (portfolio_id,)
+    ).fetchone()
+    return TicketDraft(
+        portfolio_id=portfolio_id,
+        forecast_id=forecast_id,
+        snapshot_id=snapshot_id,
+        condition_id=forecast["condition_id"],
+        outcome=outcome,
+        fills=fills,
+        fee=fee,
+        policy_hash=policy["policy_hash"],
+        rules_hash=forecast["rules_hash"],
+    )
