@@ -177,21 +177,23 @@ def connect(path: Path) -> sqlite3.Connection:
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        with transaction(conn):
-            version = _stored_version(conn)
-            if version != SCHEMA_VERSION:
-                if version is not None and version not in MIGRATIONS:
-                    raise RuntimeError(f"unsupported predict schema version {version}")
-                for statement in _statements(SCHEMA + LEDGER_SCHEMA):
-                    conn.execute(statement)
-                if version is None:
-                    conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
-                    )
-                else:
-                    for statement in MIGRATIONS[version]:
+        # Read the version without a write lock; only creation/migration needs one.
+        if _stored_version(conn) != SCHEMA_VERSION:
+            with transaction(conn):
+                version = _stored_version(conn)  # another process may have migrated
+                if version != SCHEMA_VERSION:
+                    if version is not None and version not in MIGRATIONS:
+                        raise RuntimeError(f"unsupported predict schema version {version}")
+                    for statement in _statements(SCHEMA + LEDGER_SCHEMA):
                         conn.execute(statement)
-                    conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+                    if version is None:
+                        conn.execute(
+                            "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+                        )
+                    else:
+                        for statement in MIGRATIONS[version]:
+                            conn.execute(statement)
+                        conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     except BaseException:
         conn.close()
         raise

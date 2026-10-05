@@ -49,6 +49,23 @@ class LedgerSchemaTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_connect_to_a_current_database_does_not_take_the_write_lock(self) -> None:
+        connect(self.path).close()
+        holder = sqlite3.connect(self.path, isolation_level=None)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            conn = connect(self.path)  # would block on the write lock if it began IMMEDIATE
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT version FROM schema_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+            finally:
+                conn.close()
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+
     def write_old_database(self, version: int) -> None:
         """A Plan 1 database at `version` with one run and one observation."""
         self.path.parent.mkdir(parents=True)
