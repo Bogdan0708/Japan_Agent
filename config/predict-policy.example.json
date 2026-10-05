@@ -1,9 +1,18 @@
 {
   "discovery": {
     "tag_categories": [
-      ["geopolitics", "geopolitics"],
-      ["economics", "economics"],
-      ["politics", "politics"]
+      [
+        "geopolitics",
+        "geopolitics"
+      ],
+      [
+        "economics",
+        "economics"
+      ],
+      [
+        "politics",
+        "politics"
+      ]
     ],
     "min_liquidity": "5000",
     "min_days_to_end": 2,
@@ -12,5 +21,20 @@
     "max_book_age_seconds": 120,
     "page_size": 100,
     "max_pages": 60
+  },
+  "policy": {
+    "starting_bankroll": "1000",
+    "min_edge": "0.05",
+    "min_confidence": "medium",
+    "kelly_fraction": "0.25",
+    "caps": {
+      "market": "0.02",
+      "event": "0.05",
+      "category": "0.15",
+      "total_open": "0.50"
+    },
+    "max_slippage": "0.02",
+    "min_hours_to_close": 48,
+    "max_book_age_seconds": 120
   }
 }

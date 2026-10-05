@@ -21,6 +21,7 @@ from .db import connect, record_refusal, verify_journal
 from .gamma import ParseError
 from .http import FetchError, JsonClient
 from .invariants import verify_ledger
+from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
 from .settlement import settle_open_tickets
 from .util import utc_now
@@ -86,6 +87,11 @@ def main(
         print(f"predict-agent: {error}", file=sys.stderr)
         return 2
     if args.command == "doctor":
+        try:
+            load_policy_config(settings.policy_path)
+        except ConfigError as error:
+            print(f"predict-agent: {error}", file=sys.stderr)
+            return 2
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)
