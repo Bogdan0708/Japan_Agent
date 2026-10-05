@@ -7,12 +7,14 @@ import shutil
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from predict_agent.cli import main
 from predict_agent.cohorts import cohort_portfolios
 from predict_agent.db import connect
+from predict_agent.fills import level_fee
 from predict_agent.invariants import verify_ledger
 from predict_agent.tickets import ticket_hash
 from predict_agent.util import canonical_json, isoformat
@@ -90,6 +92,20 @@ class FillInvariantTests(unittest.TestCase):
     def test_fills_beyond_recorded_depth_are_detected(self) -> None:
         self.run_cli(["trade"])
         self.rewrite_ticket(fills_json=canonical_json([["0.50", "25"]]))
+        self.assert_problem("fills are not within the recorded book")
+
+    def test_non_positive_share_fills_are_detected(self) -> None:
+        self.run_cli(["trade"])
+        fills = [(Decimal("0.50"), Decimal("20")), (Decimal("0.51"), Decimal("-5"))]
+        rate = Decimal("0.04")
+        fee = sum((level_fee(s, p, rate) for p, s in fills), Decimal("0"))
+        notional = sum((p * s for p, s in fills), Decimal("0"))
+        self.rewrite_ticket(
+            fills_json=canonical_json([[str(p), str(s)] for p, s in fills]),
+            shares=str(sum((s for _, s in fills), Decimal("0"))),
+            fee=str(fee),
+            cost_total=str(notional + fee),
+        )
         self.assert_problem("fills are not within the recorded book")
 
     def test_fee_not_from_the_snapshot_schedule_is_detected(self) -> None:

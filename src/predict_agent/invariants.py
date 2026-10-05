@@ -286,7 +286,9 @@ def _fill_problems(conn: sqlite3.Connection, ticket: sqlite3.Row) -> list[str]:
     if (
         not fills
         or len(set(prices)) != len(prices)
-        or any(price not in depth or shares > depth[price] for price, shares in fills)
+        or any(
+            price not in depth or shares <= 0 or shares > depth[price] for price, shares in fills
+        )
     ):
         problems.append(f"{label}: fills are not within the recorded book")
     rate = Decimal("0")
