@@ -157,7 +157,9 @@ def open_ticket(conn: sqlite3.Connection, draft: TicketDraft, now: datetime) -> 
                 tuple(values.values()),
             )
         except sqlite3.IntegrityError as error:
-            raise LedgerError(f"market already traded in this portfolio: {error}") from None
+            raise LedgerError(
+                f"ticket insert refused (market already traded in this portfolio?): {error}"
+            ) from None
         if cursor.lastrowid is None:
             raise LedgerError("ticket insert returned no row id")
         ticket_id = cursor.lastrowid
@@ -202,6 +204,12 @@ def record_refusal_decision(
             raise LedgerError(f"forecast {forecast_id} is not an entry forecast of this cohort")
         if _decided(conn, portfolio_id, forecast_id):
             raise LedgerError(f"forecast {forecast_id} is already decided here")
+        if not conn.execute(
+            "SELECT 1 FROM forecast_baselines WHERE forecast_id = ?", (forecast_id,)
+        ).fetchone():
+            raise LedgerError(
+                f"forecast {forecast_id} has no baseline yet; decisions follow the baseline"
+            )
         conn.execute(
             "INSERT INTO decisions (portfolio_id, forecast_id, condition_id, kind, reason, "
             "ticket_id, decided_at) VALUES (?, ?, ?, 'REFUSED', ?, NULL, ?)",

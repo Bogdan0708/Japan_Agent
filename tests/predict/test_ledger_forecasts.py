@@ -8,6 +8,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from predict_agent.cohorts import cohort_portfolios
 from predict_agent.db import connect
 from predict_agent.forecasts import (
     ForecastError,
@@ -22,6 +23,7 @@ from predict_agent.forecasts import (
     unfinished_forecasts,
     validate_forecast,
 )
+from predict_agent.util import isoformat
 from tests.predict.fixtures import CONDITION_ID, NOW
 from tests.predict.ledger_fixtures import (
     forecast_record,
@@ -239,6 +241,21 @@ class ResumeTests(ForecastTestCase):
         decisions = [r[0] for r in self.conn.execute("SELECT kind FROM decisions")]
         self.assertEqual(decisions, ["NO_TIMELY_BASELINE", "NO_TIMELY_BASELINE"])
         self.assertEqual(unfinished_forecasts(self.conn, self.cohort), [])
+
+    def test_no_timely_baseline_skips_portfolios_that_already_have_a_decision(self) -> None:
+        forecast_id = seed_entry_forecast(self.conn, self.cohort, self.rules_hash)
+        primary = cohort_portfolios(self.conn, self.cohort)["primary"]
+        # The API refuses a decision before the baseline exists; seed the state directly.
+        self.conn.execute(
+            "INSERT INTO decisions (portfolio_id, forecast_id, condition_id, kind, reason, "
+            "ticket_id, decided_at) VALUES (?, ?, ?, 'REFUSED', 'X', NULL, ?)",
+            (primary, forecast_id, CONDITION_ID, isoformat(NOW)),
+        )
+        late = NOW + timedelta(minutes=31)
+        mark_no_timely_baseline(self.conn, forecast_id, late)
+        self.assertEqual(resume_step(self.conn, forecast_id, late), ResumeStep.DONE)
+        kinds = sorted(r[0] for r in self.conn.execute("SELECT kind FROM decisions"))
+        self.assertEqual(kinds, ["NO_TIMELY_BASELINE", "REFUSED"])
 
     def test_update_forecast_is_done_after_baseline(self) -> None:
         seed_entry_forecast(self.conn, self.cohort, self.rules_hash)

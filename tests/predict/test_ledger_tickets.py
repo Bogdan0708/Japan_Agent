@@ -230,6 +230,17 @@ class RefusalDecisionTests(TicketTestCase):
         record_refusal_decision(self.conn, self.shadow, self.forecast, "EDGE_BELOW_MIN", LATER)
         self.assertEqual(self.count("decisions"), 2)
 
+    def test_refusal_before_baseline_is_refused_and_changes_nothing(self) -> None:
+        other = "0x" + "ab" * 32
+        other_rules = seed_market(self.conn, other)
+        unbaselined = seed_entry_forecast(
+            self.conn, self.cohort, other_rules, condition_id=other
+        )
+        before = self.state()
+        with self.assertRaisesRegex(LedgerError, "baseline"):
+            record_refusal_decision(self.conn, self.primary, unbaselined, "EDGE_BELOW_MIN", LATER)
+        self.assertEqual(self.state(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

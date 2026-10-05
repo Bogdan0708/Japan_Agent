@@ -380,16 +380,14 @@ def mark_no_timely_baseline(conn: sqlite3.Connection, forecast_id: int, now: dat
             (forecast_id, NO_TIMELY_BASELINE, now_text),
         )
         if forecast["kind"] == "entry":
-            portfolios = conn.execute(
-                "SELECT portfolio_id FROM portfolios WHERE cohort_id = ?",
-                (forecast["cohort_id"],),
-            ).fetchall()
-            for portfolio in portfolios:
+            # Only portfolios without a decision: a stray earlier decision must not
+            # make the whole close-out roll back on the decisions primary key.
+            for portfolio_id in undecided_portfolios(conn, forecast_id):
                 conn.execute(
                     "INSERT INTO decisions (portfolio_id, forecast_id, condition_id, kind, "
                     "reason, ticket_id, decided_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
                     (
-                        portfolio["portfolio_id"],
+                        portfolio_id,
                         forecast_id,
                         forecast["condition_id"],
                         NO_TIMELY_BASELINE,
