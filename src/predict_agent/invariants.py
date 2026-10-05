@@ -1,0 +1,288 @@
+"""Ledger invariant checks used by `predict-agent doctor`. Triggers make tampering hard;
+these checks make it visible if it happens anyway. They verify every hash (artifacts,
+cohort identities, forecasts, tickets, cash chains) and every accounting relationship
+between records, independently of the code paths that wrote them."""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from datetime import timedelta
+from decimal import Decimal
+
+from .cash import available_cash, cash_entry_hash, parse_money
+from .cohorts import portfolio_id_for
+from .db import GENESIS_HASH, SCHEMA
+from .forecasts import forecast_hash
+from .ledger_schema import LEDGER_SCHEMA
+from .settlement import SETTLEABLE_OUTCOMES, payout_per_share
+from .tickets import ticket_hash
+from .util import parse_datetime, sha256_json, sha256_text
+
+EXPECTED_TRIGGERS = frozenset(
+    re.findall(r"CREATE TRIGGER IF NOT EXISTS (\w+)", SCHEMA + LEDGER_SCHEMA)
+)
+
+
+def _trigger_problems(conn: sqlite3.Connection) -> list[str]:
+    present = {
+        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+    }
+    return [f"missing immutability trigger {name}" for name in sorted(EXPECTED_TRIGGERS - present)]
+
+
+def _artifact_problems(conn: sqlite3.Connection) -> list[str]:
+    return [
+        f"artifact {row['artifact_hash'][:12]}: content does not match its hash"
+        for row in conn.execute("SELECT artifact_hash, content FROM artifacts")
+        if sha256_text(row["content"]) != row["artifact_hash"]
+    ]
+
+
+def _kind(conn: sqlite3.Connection, digest: str) -> str | None:
+    row = conn.execute("SELECT kind FROM artifacts WHERE artifact_hash = ?", (digest,)).fetchone()
+    return None if row is None else str(row["kind"])
+
+
+def _cohort_problems(conn: sqlite3.Connection, cohort: sqlite3.Row) -> list[str]:
+    label = f"cohort {cohort['cohort_id'][:12]}"
+    identity = json.loads(cohort["identity_json"])
+    problems: list[str] = []
+    if sha256_json(identity) != cohort["cohort_id"]:
+        problems.append(f"{label}: identity does not match cohort id")
+    if identity.get("baseline_window_seconds") != cohort["baseline_window_seconds"]:
+        problems.append(f"{label}: baseline window differs from its identity")
+    if _kind(conn, identity.get("prompt_hash", "")) != "prompt":
+        problems.append(f"{label}: prompt artifact missing")
+    portfolios = {
+        row["variant"]: row
+        for row in conn.execute(
+            "SELECT * FROM portfolios WHERE cohort_id = ?", (cohort["cohort_id"],)
+        )
+    }
+    declared: dict[str, str] = identity.get("portfolios", {})
+    if set(portfolios) != set(declared):
+        problems.append(f"{label}: portfolios differ from its identity")
+    for variant, row in portfolios.items():
+        if row["portfolio_id"] != portfolio_id_for(cohort["cohort_id"], variant):
+            problems.append(f"{label}: portfolio {variant} has a wrong id")
+        if row["policy_hash"] != declared.get(variant) or _kind(conn, row["policy_hash"]) != (
+            "policy"
+        ):
+            problems.append(f"{label}: portfolio {variant} policy differs from its identity")
+        if row["starting_bankroll"] != cohort["starting_bankroll"]:
+            problems.append(f"{label}: portfolio {variant} bankroll differs from the cohort's")
+    return problems
+
+
+def _cash_problems(conn: sqlite3.Connection, portfolio: sqlite3.Row) -> list[str]:
+    portfolio_id = portfolio["portfolio_id"]
+    label = f"portfolio {portfolio_id[:12]}"
+    problems: list[str] = []
+    rows = conn.execute(
+        "SELECT * FROM cash_ledger WHERE portfolio_id = ? ORDER BY entry_id", (portfolio_id,)
+    ).fetchall()
+    prev_hash = GENESIS_HASH
+    for row in rows:
+        expected = cash_entry_hash(
+            portfolio_id, row["entry_type"], row["amount"], row["ticket_id"], row["at"], prev_hash
+        )
+        if expected != row["entry_hash"]:
+            problems.append(f"{label}: cash chain broken at entry {row['entry_id']}")
+            break
+        prev_hash = row["entry_hash"]
+    fundings = [row for row in rows if row["entry_type"] == "FUNDING"]
+    if (
+        not rows
+        or len(fundings) != 1
+        or rows[0]["entry_type"] != "FUNDING"
+        or parse_money(fundings[0]["amount"]) != parse_money(portfolio["starting_bankroll"])
+    ):
+        problems.append(f"{label}: needs exactly one first FUNDING equal to its bankroll")
+    balance = Decimal("0")
+    for row in rows:
+        amount = parse_money(row["amount"])
+        balance += -amount if row["entry_type"] == "DEBIT" else amount
+        if balance < 0:
+            problems.append(f"{label}: cash went negative at entry {row['entry_id']}")
+            break
+        if row["ticket_id"] is not None:
+            owner = conn.execute(
+                "SELECT portfolio_id FROM paper_tickets WHERE ticket_id = ?", (row["ticket_id"],)
+            ).fetchone()
+            if owner is None or owner["portfolio_id"] != portfolio_id:
+                problems.append(
+                    f"{label}: entry {row['entry_id']} is for a ticket of another portfolio"
+                )
+    if available_cash(conn, portfolio_id) < 0:
+        problems.append(f"{label}: available cash is negative")
+    return problems
+
+
+def _forecast_problems(conn: sqlite3.Connection, forecast: sqlite3.Row) -> list[str]:
+    label = f"forecast {forecast['forecast_id']}"
+    problems: list[str] = []
+    if forecast_hash(dict(forecast)) != forecast["forecast_hash"]:
+        problems.append(f"{label}: forecast hash mismatch")
+    if _kind(conn, forecast["research_input_hash"]) != "research_input":
+        problems.append(f"{label}: research input artifact missing")
+    if _kind(conn, forecast["transcript_hash"]) != "tool_transcript":
+        problems.append(f"{label}: tool transcript artifact missing")
+    attempt = conn.execute(
+        "SELECT * FROM research_attempts WHERE attempt_id = ?", (forecast["attempt_id"],)
+    ).fetchone()
+    if (
+        attempt is None
+        or attempt["status"] != "SUCCEEDED"
+        or attempt["cohort_id"] != forecast["cohort_id"]
+        or attempt["condition_id"] != forecast["condition_id"]
+        or attempt["cost_usd"] != forecast["cost_usd"]
+    ):
+        problems.append(f"{label}: research attempt does not match")
+    baseline = conn.execute(
+        "SELECT * FROM forecast_baselines WHERE forecast_id = ?", (forecast["forecast_id"],)
+    ).fetchone()
+    if baseline is not None and baseline["reason"] is None:
+        window = conn.execute(
+            "SELECT baseline_window_seconds FROM cohorts WHERE cohort_id = ?",
+            (forecast["cohort_id"],),
+        ).fetchone()["baseline_window_seconds"]
+        start = parse_datetime(forecast["created_at"])
+        deadline = start + timedelta(seconds=window)
+        for column, outcome in (("yes_snapshot_id", "YES"), ("no_snapshot_id", "NO")):
+            snap = conn.execute(
+                "SELECT condition_id, outcome, fetched_at FROM book_snapshots WHERE id = ?",
+                (baseline[column],),
+            ).fetchone()
+            if (
+                snap is None
+                or snap["condition_id"] != forecast["condition_id"]
+                or snap["outcome"] != outcome
+                or not start <= parse_datetime(snap["fetched_at"]) <= deadline
+            ):
+                problems.append(f"{label}: {outcome} baseline is outside the baseline window")
+    return problems
+
+
+def _ticket_problems(conn: sqlite3.Connection, ticket: sqlite3.Row) -> list[str]:
+    ticket_id = ticket["ticket_id"]
+    label = f"ticket {ticket_id}"
+    problems: list[str] = []
+    if ticket_hash(dict(ticket)) != ticket["ticket_hash"]:
+        problems.append(f"{label}: ticket hash mismatch")
+    portfolio = conn.execute(
+        "SELECT * FROM portfolios WHERE portfolio_id = ?", (ticket["portfolio_id"],)
+    ).fetchone()
+    if portfolio is None or ticket["policy_hash"] != portfolio["policy_hash"]:
+        problems.append(f"{label}: policy differs from its portfolio's frozen policy")
+    forecast = conn.execute(
+        "SELECT * FROM forecasts WHERE forecast_id = ?", (ticket["forecast_id"],)
+    ).fetchone()
+    baseline = conn.execute(
+        "SELECT * FROM forecast_baselines WHERE forecast_id = ? AND reason IS NULL",
+        (ticket["forecast_id"],),
+    ).fetchone()
+    side = "yes_snapshot_id" if ticket["outcome"] == "YES" else "no_snapshot_id"
+    if (
+        forecast is None
+        or portfolio is None
+        or forecast["cohort_id"] != portfolio["cohort_id"]
+        or forecast["condition_id"] != ticket["condition_id"]
+        or forecast["kind"] != "entry"
+        or forecast["abstained"]
+        or forecast["rules_hash"] != ticket["rules_hash"]
+        or baseline is None
+        or baseline[side] != ticket["snapshot_id"]
+    ):
+        problems.append(f"{label}: not backed by its forecast and baseline")
+    decision = conn.execute(
+        "SELECT kind, ticket_id FROM decisions WHERE portfolio_id = ? AND forecast_id = ?",
+        (ticket["portfolio_id"], ticket["forecast_id"]),
+    ).fetchone()
+    if decision is None or decision["kind"] != "TRADED" or decision["ticket_id"] != ticket_id:
+        problems.append(f"{label}: no matching TRADED decision")
+    debits = conn.execute(
+        "SELECT amount FROM cash_ledger WHERE ticket_id = ? AND entry_type = 'DEBIT'",
+        (ticket_id,),
+    ).fetchall()
+    if [parse_money(d["amount"]) for d in debits] != [parse_money(ticket["cost_total"])]:
+        problems.append(f"{label}: debit does not match cost_total")
+    credits = [
+        parse_money(c["amount"])
+        for c in conn.execute(
+            "SELECT amount FROM cash_ledger WHERE ticket_id = ? AND entry_type = 'CREDIT'",
+            (ticket_id,),
+        )
+    ]
+    settlement = conn.execute(
+        "SELECT * FROM settlements WHERE ticket_id = ?", (ticket_id,)
+    ).fetchone()
+    if ticket["status"] == "SETTLED" and settlement is None:
+        problems.append(f"{label}: SETTLED without a settlement row")
+    if ticket["status"] == "OPEN" and settlement is not None:
+        problems.append(f"{label}: OPEN but has a settlement row")
+    if settlement is None:
+        if credits:
+            problems.append(f"{label}: credit without a settlement")
+        return problems
+    if credits != [parse_money(settlement["payout"])]:
+        problems.append(f"{label}: credit does not match settlement payout")
+    problems += _settlement_problems(conn, ticket, settlement)
+    return problems
+
+
+def _settlement_problems(
+    conn: sqlite3.Connection, ticket: sqlite3.Row, settlement: sqlite3.Row
+) -> list[str]:
+    label = f"ticket {ticket['ticket_id']}"
+    problems: list[str] = []
+    observation = conn.execute(
+        "SELECT * FROM resolution_observations WHERE id = ?", (settlement["observation_id"],)
+    ).fetchone()
+    if (
+        observation is None
+        or observation["condition_id"] != ticket["condition_id"]
+        or observation["status"] != "resolved"
+        or observation["cross_check"] != "CONFIRMED"
+        or observation["outcome"] != settlement["outcome"]
+        or settlement["outcome"] not in SETTLEABLE_OUTCOMES
+    ):
+        problems.append(f"{label}: settlement is not backed by a confirmed resolution")
+        return problems
+    per_share = payout_per_share(ticket["outcome"], settlement["outcome"])
+    payout = parse_money(ticket["shares"]) * per_share
+    if (
+        parse_money(settlement["payout_per_share"]) != per_share
+        or parse_money(settlement["payout"]) != payout
+        or parse_money(settlement["net_pnl"]) != payout - parse_money(ticket["cost_total"])
+    ):
+        problems.append(f"{label}: settlement payout arithmetic is wrong")
+    return problems
+
+
+def _decision_problems(conn: sqlite3.Connection) -> list[str]:
+    problems: list[str] = []
+    for row in conn.execute(
+        "SELECT d.*, p.cohort_id AS portfolio_cohort, f.cohort_id AS forecast_cohort, "
+        "f.kind AS forecast_kind FROM decisions d "
+        "JOIN portfolios p ON p.portfolio_id = d.portfolio_id "
+        "JOIN forecasts f ON f.forecast_id = d.forecast_id"
+    ):
+        if row["portfolio_cohort"] != row["forecast_cohort"] or row["forecast_kind"] != "entry":
+            problems.append(f"decision on forecast {row['forecast_id']}: wrong cohort or kind")
+    return problems
+
+
+def verify_ledger(conn: sqlite3.Connection) -> list[str]:
+    problems = _trigger_problems(conn) + _artifact_problems(conn)
+    for cohort in conn.execute("SELECT * FROM cohorts ORDER BY started_at").fetchall():
+        problems += _cohort_problems(conn, cohort)
+    for portfolio in conn.execute("SELECT * FROM portfolios ORDER BY portfolio_id").fetchall():
+        problems += _cash_problems(conn, portfolio)
+    for forecast in conn.execute("SELECT * FROM forecasts ORDER BY forecast_id").fetchall():
+        problems += _forecast_problems(conn, forecast)
+    for ticket in conn.execute("SELECT * FROM paper_tickets ORDER BY ticket_id").fetchall():
+        problems += _ticket_problems(conn, ticket)
+    problems += _decision_problems(conn)
+    return problems

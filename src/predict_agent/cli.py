@@ -20,7 +20,9 @@ from .config import ConfigError, DiscoveryConfig, Settings, load_discovery_confi
 from .db import connect, record_refusal, verify_journal
 from .gamma import ParseError
 from .http import FetchError, JsonClient
+from .invariants import verify_ledger
 from .report import render_markdown, shortlist
+from .settlement import settle_open_tickets
 from .util import utc_now
 
 
@@ -33,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("discover", help="discover eligible markets")
     sub.add_parser("snapshot", help="snapshot books for the latest discovery run")
     sub.add_parser("resolve", help="poll resolution state for known markets")
+    sub.add_parser("settle", help="settle open paper tickets from stored resolutions (offline)")
     report = sub.add_parser("report", help="write the shortlist report")
     which = report.add_mutually_exclusive_group(required=True)
     which.add_argument("--run")
@@ -85,11 +88,28 @@ def main(
     if args.command == "doctor":
         conn = connect(settings.database_path)
         try:
-            ok = verify_journal(conn)
+            journal_ok = verify_journal(conn)
+            problems = verify_ledger(conn)
         finally:
             conn.close()
-        print(f"policy {policy_hash[:12]} ok; journal chain {'ok' if ok else 'BROKEN'}")
-        return 0 if ok else 3
+        print(f"policy {policy_hash[:12]} ok; journal chain {'ok' if journal_ok else 'BROKEN'}")
+        for problem in problems:
+            print(f"ledger: {problem}")
+        print(f"ledger: {'ok' if not problems else f'{len(problems)} problem(s)'}")
+        return 0 if journal_ok and not problems else 3
+    if args.command == "settle":
+        now = now_fn()
+        conn = connect(settings.database_path)
+        try:
+            summary = settle_open_tickets(conn, now)
+        finally:
+            conn.close()
+        print(f"settled {summary.settled}; pending {len(summary.pending)}")
+        for item in summary.pending:
+            age = item.age(now)
+            since = "never resolved" if age is None else f"resolved {age} ago"
+            print(f"pending ticket {item.ticket_id} {item.condition_id}: {item.reason} ({since})")
+        return 0
     http = client or JsonClient()
     if args.command == "report":
         run_id = args.run or _latest_discovery_run(settings.database_path)
