@@ -11,6 +11,6 @@
     "known_outcome_threshold": "0.98",
     "max_book_age_seconds": 120,
     "page_size": 100,
-    "max_pages": 20
+    "max_pages": 60
   }
 }

@@ -36,7 +36,7 @@ def events_routes(
 ) -> dict[str, list[object]]:
     routes: dict[str, list[object]] = {}
     for slug, _category in CONFIG.tag_categories:
-        routes[f"tag_slug={slug}"] = [events_by_tag.get(slug, [])]
+        routes[f"tag_slug={slug}"] = [{"events": events_by_tag.get(slug, [])}]
     routes["/v2/resolutions"] = [{"data": resolutions}]
     return routes
 
@@ -191,6 +191,7 @@ class ResolutionPollTests(CollectTestCase):
         self.assertEqual(stored, 1)
         row = self.conn.execute("SELECT * FROM resolution_observations").fetchone()
         self.assertEqual((row["status"], row["outcome"]), ("resolved", "NO"))
+        self.assertEqual(row["cross_check"], "CONFIRMED")
 
     def test_open_market_observation_has_no_outcome_and_no_gamma_call(self) -> None:
         opener = RoutedOpener(
@@ -215,6 +216,57 @@ class GeoblockTests(CollectTestCase):
         opener = RoutedOpener({"api/geoblock": [http_error(403)]})
         self.assertIsNone(record_geoblock(self.conn, self.client(opener), self.run_id))
         self.assertIn("HTTP 403", self.conn.execute("SELECT geoblock_json FROM runs").fetchone()[0])
+
+
+class ReviewFixTests(CollectTestCase):
+    def test_rules_edit_on_known_but_ineligible_market_is_recorded(self) -> None:
+        first = RoutedOpener(
+            events_routes({"politics": [gamma_event([gamma_market()])]}, [resolution_row()])
+        )
+        discover(self.conn, self.client(first), CONFIG, self.run_id, NOW)
+        later = start_run(self.conn, "test", POLICY_HASH, NOW)
+        edited = gamma_market(closed=True, description="Clarified near resolution.")
+        second = RoutedOpener(events_routes({"politics": [gamma_event([edited])]}, []))
+        summary = discover(self.conn, self.client(second), CONFIG, later, NOW)
+        self.assertEqual(summary.refusals, {"NOT_OPEN": 1})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM rules_versions").fetchone()[0], 2)
+        kinds = [r["kind"] for r in self.conn.execute("SELECT kind FROM journal ORDER BY seq")]
+        self.assertIn("RULES_CHANGED", kinds)
+        self.assertTrue(verify_journal(self.conn))
+
+    def test_identical_rules_on_two_markets_keep_separate_versions(self) -> None:
+        other = "0x" + "d" * 64
+        markets = [gamma_market(), gamma_market(conditionId=other)]
+        rows = [resolution_row(), resolution_row(condition_id=other)]
+        opener = RoutedOpener(events_routes({"politics": [gamma_event(markets)]}, rows))
+        discover(self.conn, self.client(opener), CONFIG, self.run_id, NOW)
+        owners = sorted(
+            r["condition_id"] for r in self.conn.execute("SELECT condition_id FROM rules_versions")
+        )
+        self.assertEqual(owners, sorted([CONDITION_ID, other]))
+
+    def test_malformed_market_entries_are_refused_not_raised(self) -> None:
+        event = gamma_event([gamma_market()])
+        event["markets"] = ["not-an-object", gamma_market(bestBid="NaN")]
+        opener = RoutedOpener(events_routes({"politics": [event]}, []))
+        summary = discover(self.conn, self.client(opener), CONFIG, self.run_id, NOW)
+        self.assertEqual(summary.refusals, {"PARSE_ERROR": 2})
+
+    def test_resolution_without_closed_gamma_market_is_unchecked(self) -> None:
+        opener = RoutedOpener(
+            events_routes({"politics": [gamma_event([gamma_market()])]}, [resolution_row()])
+        )
+        discover(self.conn, self.client(opener), CONFIG, self.run_id, NOW)
+        poll = RoutedOpener(
+            {
+                "/v2/resolutions": [{"data": [resolution_row(status="resolved", price="0")]}],
+                "/markets?": [[]],
+            }
+        )
+        poll_resolutions(self.conn, self.client(poll), self.run_id, NOW)
+        query = "SELECT outcome, cross_check FROM resolution_observations"
+        row = self.conn.execute(query).fetchone()
+        self.assertEqual((row["outcome"], row["cross_check"]), ("NO", "UNCHECKED"))
 
 
 if __name__ == "__main__":

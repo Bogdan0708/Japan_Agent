@@ -80,5 +80,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.reports_dir, Path("/x/data/reports"))
 
 
+class NonFiniteConfigTests(unittest.TestCase):
+    def test_nan_config_rejected(self) -> None:
+        raw = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+        raw["discovery"]["min_liquidity"] = "NaN"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "min_liquidity"):
+                load_discovery_config(path)
+
+
 if __name__ == "__main__":
     unittest.main()

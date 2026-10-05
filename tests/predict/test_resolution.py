@@ -51,14 +51,23 @@ class OutcomeMappingTests(unittest.TestCase):
         self.assertIsNone(gamma_outcome('["0.36", "0.64"]'))
         self.assertIsNone(gamma_outcome(None))
 
-    def test_reconcile_agreement_keeps_outcome(self) -> None:
-        state = parse_resolution(resolution_row(status="resolved", price="0"))
-        self.assertEqual(reconcile_outcome(state, "NO"), "NO")
-        self.assertEqual(reconcile_outcome(state, None), "NO")
+    def test_cross_check_states(self) -> None:
+        resolved_no = parse_resolution(resolution_row(status="resolved", price="0"))
+        cases = (
+            ('["0", "1"]', ("NO", "CONFIRMED")),
+            ('["1", "0"]', ("UNKNOWN", "MISMATCH")),
+            ('["0.9995", "0.0005"]', ("UNKNOWN", "MISMATCH")),
+            ('["0.0005", "0.9995"]', ("NO", "UNCHECKED")),
+            ('["0.4", "0.6"]', ("NO", "UNCHECKED")),
+            (None, ("NO", "UNCHECKED")),
+        )
+        for prices, expected in cases:
+            with self.subTest(prices=prices):
+                self.assertEqual(reconcile_outcome(resolved_no, prices), expected)
 
-    def test_reconcile_mismatch_is_unknown(self) -> None:
-        state = parse_resolution(resolution_row(status="resolved", price="0"))
-        self.assertEqual(reconcile_outcome(state, "YES"), "UNKNOWN")
+    def test_unresolved_state_is_not_applicable(self) -> None:
+        state = parse_resolution(resolution_row())
+        self.assertEqual(reconcile_outcome(state, '["1", "0"]'), (None, "NOT_APPLICABLE"))
 
 
 class RefusalTests(unittest.TestCase):

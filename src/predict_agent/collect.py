@@ -25,7 +25,6 @@ from .http import FetchError, JsonClient
 from .resolution import (
     fetch_closed_gamma_markets,
     fetch_resolutions,
-    gamma_outcome,
     parse_resolution,
     reconcile_outcome,
     resolution_refusal,
@@ -51,6 +50,15 @@ def start_run(conn: sqlite3.Connection, command: str, policy_hash: str, now: dat
     return run_id
 
 
+def finish_run(conn: sqlite3.Connection, run_id: str, status: str, now: datetime) -> None:
+    if status not in ("COMPLETED", "FAILED"):
+        raise ValueError(f"invalid run status {status}")
+    conn.execute(
+        "UPDATE runs SET status = ?, finished_at = ? WHERE run_id = ?",
+        (status, isoformat(now), run_id),
+    )
+
+
 def record_geoblock(
     conn: sqlite3.Connection, client: JsonClient, run_id: str
 ) -> dict[str, Any] | None:
@@ -66,6 +74,62 @@ def record_geoblock(
     return returned
 
 
+def _record_rules_version(
+    conn: sqlite3.Connection, candidate: MarketCandidate, now: datetime
+) -> str:
+    """Store this market's rules version; journal RULES_CHANGED when a known market's rules
+    moved. The caller holds the transaction."""
+    new_hash = rules_hash(candidate)
+    conn.execute(
+        "INSERT OR IGNORE INTO rules_versions (condition_id, rules_hash, rules_json, "
+        "first_seen_at) VALUES (?, ?, ?, ?)",
+        (
+            candidate.condition_id,
+            new_hash,
+            canonical_json(rules_payload(candidate)),
+            isoformat(now),
+        ),
+    )
+    existing = conn.execute(
+        "SELECT current_rules_hash FROM markets WHERE condition_id = ?",
+        (candidate.condition_id,),
+    ).fetchone()
+    if existing is not None and existing["current_rules_hash"] != new_hash:
+        append_journal(
+            conn,
+            "RULES_CHANGED",
+            {
+                "condition_id": candidate.condition_id,
+                "from": existing["current_rules_hash"],
+                "to": new_hash,
+            },
+            now,
+        )
+        conn.execute(
+            "UPDATE markets SET current_rules_hash = ? WHERE condition_id = ?",
+            (new_hash, candidate.condition_id),
+        )
+    return new_hash
+
+
+def _track_known_market(
+    conn: sqlite3.Connection, candidate: MarketCandidate, now: datetime
+) -> None:
+    """Keep rules history current for markets already stored, whatever their eligibility now:
+    clarifications tend to land near resolution, after a market leaves the shortlist."""
+    known = conn.execute(
+        "SELECT 1 FROM markets WHERE condition_id = ?", (candidate.condition_id,)
+    ).fetchone()
+    if known is None:
+        return
+    with transaction(conn):
+        _record_rules_version(conn, candidate, now)
+        conn.execute(
+            "UPDATE markets SET last_seen_at = ? WHERE condition_id = ?",
+            (isoformat(now), candidate.condition_id),
+        )
+
+
 def _store_market(
     conn: sqlite3.Connection,
     candidate: MarketCandidate,
@@ -73,19 +137,13 @@ def _store_market(
     run_id: str,
     now: datetime,
 ) -> None:
-    new_hash = rules_hash(candidate)
     now_text = isoformat(now)
+    schedule = canonical_json(candidate.fee_schedule) if candidate.fee_schedule else None
     with transaction(conn):
-        conn.execute(
-            "INSERT OR IGNORE INTO rules_versions (rules_hash, condition_id, rules_json, "
-            "first_seen_at) VALUES (?, ?, ?, ?)",
-            (new_hash, candidate.condition_id, canonical_json(rules_payload(candidate)), now_text),
-        )
+        new_hash = _record_rules_version(conn, candidate, now)
         existing = conn.execute(
-            "SELECT current_rules_hash FROM markets WHERE condition_id = ?",
-            (candidate.condition_id,),
+            "SELECT 1 FROM markets WHERE condition_id = ?", (candidate.condition_id,)
         ).fetchone()
-        schedule = canonical_json(candidate.fee_schedule) if candidate.fee_schedule else None
         if existing is None:
             conn.execute(
                 "INSERT INTO markets (condition_id, event_id, question, category, yes_token_id, "
@@ -109,25 +167,12 @@ def _store_market(
                 conn, "MARKET_DISCOVERED", {"condition_id": candidate.condition_id}, now
             )
         else:
-            if existing["current_rules_hash"] != new_hash:
-                append_journal(
-                    conn,
-                    "RULES_CHANGED",
-                    {
-                        "condition_id": candidate.condition_id,
-                        "from": existing["current_rules_hash"],
-                        "to": new_hash,
-                    },
-                    now,
-                )
             conn.execute(
-                "UPDATE markets SET question = ?, category = ?, current_rules_hash = ?, "
-                "fees_enabled = ?, fee_schedule_json = ?, last_seen_at = ? "
-                "WHERE condition_id = ?",
+                "UPDATE markets SET question = ?, category = ?, fees_enabled = ?, "
+                "fee_schedule_json = ?, last_seen_at = ? WHERE condition_id = ?",
                 (
                     candidate.question,
                     category,
-                    new_hash,
                     int(candidate.fees_enabled),
                     schedule,
                     now_text,
@@ -151,7 +196,13 @@ def discover(
     seen: set[str] = set()
     passing: list[MarketCandidate] = []
     for event in fetch_events(client, config):
-        for raw_market in event.get("markets") or []:
+        raw_markets = event.get("markets")
+        for raw_market in raw_markets if isinstance(raw_markets, list) else []:
+            if not isinstance(raw_market, dict):
+                refusals["PARSE_ERROR"] += 1
+                detail = f"market entry is {type(raw_market).__name__}, not an object"
+                record_refusal(conn, run_id, None, "discover", "PARSE_ERROR", detail, now)
+                continue
             key = str(raw_market.get("conditionId") or id(raw_market))
             if key in seen:
                 continue
@@ -162,6 +213,7 @@ def discover(
                 refusals["PARSE_ERROR"] += 1
                 record_refusal(conn, run_id, None, "discover", "PARSE_ERROR", str(error), now)
                 continue
+            _track_known_market(conn, candidate, now)
             reason = eligibility_refusal(candidate, config, now)
             if reason is not None:
                 refusals[reason] += 1
@@ -255,18 +307,20 @@ def poll_resolutions(
                 )
                 continue
             market = gamma.get(condition_id)
-            outcome = reconcile_outcome(
-                state, gamma_outcome(market.get("outcomePrices")) if market else None
+            outcome, cross_check = reconcile_outcome(
+                state, market.get("outcomePrices") if market else None
             )
             conn.execute(
                 "INSERT INTO resolution_observations (run_id, condition_id, fetched_at, status, "
-                "outcome, was_disputed, new_version_q, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "outcome, cross_check, was_disputed, new_version_q, raw_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     condition_id,
                     isoformat(now),
                     state.status,
                     outcome,
+                    cross_check,
                     int(state.was_disputed),
                     int(state.new_version_q),
                     canonical_json(state.raw),

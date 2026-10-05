@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .gamma import GAMMA_URL, ParseError
@@ -12,6 +13,7 @@ DATA_API_URL = "https://data-api.polymarket.com"
 OPEN_STATUSES = frozenset({"initialized", "posed", "active"})
 BATCH = 20
 MICRO = 1_000_000
+LEAN_THRESHOLD = Decimal("0.95")
 _UMA_PRICES = {
     "1000000000000000000": "YES",
     "0": "NO",
@@ -69,10 +71,37 @@ def gamma_outcome(outcome_prices: object) -> str | None:
     return _GAMMA_PRICES.get((str(prices[0]), str(prices[1])))
 
 
-def reconcile_outcome(state: ResolutionState, gamma: str | None) -> str | None:
-    if state.outcome in (None, "UNKNOWN") or gamma is None:
-        return state.outcome
-    return state.outcome if gamma == state.outcome else "UNKNOWN"
+def _gamma_lean(outcome_prices: object) -> str | None:
+    """YES/NO when Gamma's YES price is near-certain (>= 0.95 or <= 0.05), else None."""
+    if not isinstance(outcome_prices, str):
+        return None
+    try:
+        prices = json.loads(outcome_prices)
+        yes = Decimal(str(prices[0]))
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError, InvalidOperation):
+        return None
+    if not yes.is_finite():
+        return None
+    if yes >= LEAN_THRESHOLD:
+        return "YES"
+    if yes <= 1 - LEAN_THRESHOLD:
+        return "NO"
+    return None
+
+
+def reconcile_outcome(state: ResolutionState, outcome_prices: object) -> tuple[str | None, str]:
+    """Return (outcome, cross_check). Only an exact Gamma 0/1 (or 0.5/0.5) agreement is
+    CONFIRMED; any disagreement, including a near-certain opposite price, is a MISMATCH and
+    the outcome becomes UNKNOWN. Anything else stays UNCHECKED."""
+    if state.outcome in (None, "UNKNOWN"):
+        return state.outcome, "NOT_APPLICABLE"
+    exact = gamma_outcome(outcome_prices)
+    if exact is not None:
+        return (state.outcome, "CONFIRMED") if exact == state.outcome else ("UNKNOWN", "MISMATCH")
+    lean = _gamma_lean(outcome_prices)
+    if lean is not None and state.outcome != "HALF" and lean != state.outcome:
+        return "UNKNOWN", "MISMATCH"
+    return state.outcome, "UNCHECKED"
 
 
 def resolution_refusal(row: Mapping[str, Any] | None) -> str | None:

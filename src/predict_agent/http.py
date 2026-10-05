@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import time
@@ -86,7 +87,8 @@ class JsonClient:
                     raise FetchError(full_url, f"HTTP {status}") from None
                 retry_after = _retry_after(header)
                 reason = f"HTTP {status}"
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            except (OSError, http.client.HTTPException) as error:
+                # URLError, timeouts, resets and SSL errors are all OSError subclasses.
                 reason = f"network error {type(error).__name__}"
             else:
                 try:

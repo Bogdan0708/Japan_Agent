@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -123,22 +124,37 @@ class RulesHashTests(unittest.TestCase):
 
 
 class FetchEventsTests(unittest.TestCase):
-    def test_paginates_with_offset_and_dedupes_across_tags(self) -> None:
-        page_size = CONFIG.page_size
-        first_page = [gamma_event([], event_id=str(i)) for i in range(page_size)]
-        last_page = [gamma_event([], event_id="last")]
-        duplicate = [gamma_event([], event_id="0")]
-        opener = ScriptedOpener([first_page, last_page, [], duplicate])
+    def test_follows_keyset_cursor_and_dedupes_across_tags(self) -> None:
+        page_one = {"events": [gamma_event([], event_id="1")], "next_cursor": "c1"}
+        page_two = {"events": [gamma_event([], event_id="2")]}
+        duplicate = {"events": [gamma_event([], event_id="1")]}
+        opener = ScriptedOpener([page_one, page_two, {"events": []}, duplicate])
         events = fetch_events(JsonClient(opener=opener, sleep=lambda _: None), CONFIG)
-        self.assertEqual(len(events), page_size + 1)
-        self.assertIn("offset=100", opener.requests[1])
+        self.assertEqual([e["id"] for e in events], ["1", "2"])
+        self.assertIn("/events/keyset?", opener.requests[0])
         self.assertIn("tag_slug=geopolitics", opener.requests[0])
+        self.assertNotIn("after_cursor", opener.requests[0])
+        self.assertIn("after_cursor=c1", opener.requests[1])
+        self.assertNotIn("offset", "".join(opener.requests))
         self.assertIn("tag_slug=economics", opener.requests[2])
 
-    def test_non_list_response_is_parse_error(self) -> None:
-        opener = ScriptedOpener([{"error": "x"}])
+    def test_non_envelope_response_is_parse_error(self) -> None:
+        opener = ScriptedOpener([[gamma_event([])]])
         with self.assertRaises(ParseError):
             fetch_events(JsonClient(opener=opener, sleep=lambda _: None), CONFIG)
+
+
+class RobustnessTests(unittest.TestCase):
+    def test_nan_quote_is_parse_error(self) -> None:
+        with self.assertRaises(ParseError):
+            candidate(bestBid="NaN")
+
+    def test_truncated_discovery_fails_closed(self) -> None:
+        tiny = replace(CONFIG, page_size=2, max_pages=1)
+        full = [gamma_event([], event_id="1"), gamma_event([], event_id="2")]
+        opener = ScriptedOpener([{"events": full, "next_cursor": "more"}])
+        with self.assertRaisesRegex(ParseError, "truncated"):
+            fetch_events(JsonClient(opener=opener, sleep=lambda _: None), tiny)
 
 
 if __name__ == "__main__":

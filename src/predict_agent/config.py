@@ -44,9 +44,12 @@ class Settings:
 
 def _decimal(raw: dict[str, Any], key: str) -> Decimal:
     try:
-        return Decimal(str(raw[key]))
+        value = Decimal(str(raw[key]))
     except (KeyError, InvalidOperation) as error:
         raise ConfigError(f"discovery.{key} must be a decimal") from error
+    if not value.is_finite():
+        raise ConfigError(f"discovery.{key} must be a finite decimal")
+    return value
 
 
 def _positive_int(raw: dict[str, Any], key: str) -> int:

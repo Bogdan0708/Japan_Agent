@@ -35,9 +35,9 @@ class ShortlistTests(unittest.TestCase):
             gamma_market(conditionId="0x" + "c" * 64, liquidityNum=1),
         ]
         routes: dict[str, list[object]] = {
-            "tag_slug=geopolitics": [[]],
-            "tag_slug=economics": [[]],
-            "tag_slug=politics": [[gamma_event(markets)]],
+            "tag_slug=geopolitics": [{"events": []}],
+            "tag_slug=economics": [{"events": []}],
+            "tag_slug=politics": [{"events": [gamma_event(markets)]}],
             "/v2/resolutions": [{"data": [resolution_row()]}],
             f"token_id={YES_TOKEN}": [clob_book()],
             f"token_id={NO_TOKEN}": [clob_book(asset_id=NO_TOKEN)],

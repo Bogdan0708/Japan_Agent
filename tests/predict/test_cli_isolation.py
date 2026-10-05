@@ -4,13 +4,14 @@ import ast
 import contextlib
 import io
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from predict_agent.cli import main
 from predict_agent.http import JsonClient
-from tests.predict.fakes import RoutedOpener
+from tests.predict.fakes import RoutedOpener, http_error
 from tests.predict.fixtures import (
     NO_TOKEN,
     NOW,
@@ -83,9 +84,9 @@ class CliTests(unittest.TestCase):
         self.install_policy()
         routes: dict[str, list[object]] = {
             "api/geoblock": [{"blocked": True, "country": "GB"}],
-            "tag_slug=geopolitics": [[]],
-            "tag_slug=economics": [[]],
-            "tag_slug=politics": [[gamma_event([gamma_market()])]],
+            "tag_slug=geopolitics": [{"events": []}],
+            "tag_slug=economics": [{"events": []}],
+            "tag_slug=politics": [{"events": [gamma_event([gamma_market()])]}],
             "/v2/resolutions": [{"data": [resolution_row()]}, {"data": [resolution_row()]}],
             f"token_id={YES_TOKEN}": [clob_book()],
             f"token_id={NO_TOKEN}": [clob_book(asset_id=NO_TOKEN)],
@@ -96,6 +97,37 @@ class CliTests(unittest.TestCase):
         reports = sorted((self.root / "data" / "reports").iterdir())
         self.assertEqual([p.suffix for p in reports], [".json", ".md"])
         self.assertIn("eligible: 1", reports[1].read_text(encoding="utf-8"))
+
+
+class RunLifecycleTests(CliTests):
+    def test_failed_run_is_marked_and_excluded_from_latest(self) -> None:
+        self.install_policy()
+        routes: dict[str, list[object]] = {
+            "api/geoblock": [{"blocked": True, "country": "GB"}],
+            "tag_slug=geopolitics": [{"events": []}],
+            "tag_slug=economics": [{"events": []}],
+            "tag_slug=politics": [{"events": [gamma_event([gamma_market()])]}],
+            "/v2/resolutions": [http_error(503)] * 4,
+        }
+        client = JsonClient(opener=RoutedOpener(routes), sleep=lambda _: None)
+        code, _ = self.run_cli(["run-data"], client=client)
+        self.assertEqual(code, 4)
+        conn = sqlite3.connect(self.root / "data" / "predict.sqlite3")
+        try:
+            status = conn.execute("SELECT status FROM runs").fetchone()[0]
+            refusal = conn.execute("SELECT reason_code FROM refusals").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual((status, refusal), ("FAILED", "FETCH_ERROR"))
+        code, output = self.run_cli(["report", "--latest"])
+        self.assertEqual(code, 2)
+        self.assertIn("no completed discovery run", output)
+
+    def test_unknown_run_report_exits_2(self) -> None:
+        self.install_policy()
+        code, output = self.run_cli(["report", "--run", "nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown run", output)
 
 
 if __name__ == "__main__":

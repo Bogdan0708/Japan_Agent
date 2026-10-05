@@ -29,7 +29,8 @@ def shortlist(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     markets = conn.execute(
         "SELECT m.*, r.rules_json FROM markets m "
         "JOIN discoveries d ON d.condition_id = m.condition_id "
-        "JOIN rules_versions r ON r.rules_hash = m.current_rules_hash "
+        "JOIN rules_versions r ON r.condition_id = m.condition_id "
+        "AND r.rules_hash = m.current_rules_hash "
         "WHERE d.run_id = ? ORDER BY m.category, m.question",
         (run_id,),
     ).fetchall()

@@ -69,5 +69,11 @@ class RefusalTests(unittest.TestCase):
         self.assertNotEqual(snapshot_hash(parsed()), snapshot_hash(parsed(hash="other")))
 
 
+class NonFiniteBookTests(unittest.TestCase):
+    def test_nan_price_is_parse_error(self) -> None:
+        with self.assertRaises(ParseError):
+            parsed(asks=[{"price": "NaN", "size": "5"}])
+
+
 if __name__ == "__main__":
     unittest.main()

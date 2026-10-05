@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import http.client
+import ssl
 import unittest
 import urllib.error
 
@@ -63,6 +65,16 @@ class JsonClientTests(unittest.TestCase):
         with self.assertRaisesRegex(FetchError, "malformed JSON"):
             client(opener, sleeps).get("https://h/x")
         self.assertEqual(sleeps, [])
+
+
+class ReadPhaseErrorTests(unittest.TestCase):
+    def test_incomplete_read_and_ssl_errors_are_retried(self) -> None:
+        sleeps: list[float] = []
+        opener = ScriptedOpener(
+            [http.client.IncompleteRead(b""), ssl.SSLError("bad record"), {"ok": 1}]
+        )
+        self.assertEqual(client(opener, sleeps).get("https://h/x"), {"ok": 1})
+        self.assertEqual(len(sleeps), 2)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS runs (
     command TEXT NOT NULL,
     started_at TEXT NOT NULL,
     policy_hash TEXT NOT NULL,
-    geoblock_json TEXT
+    geoblock_json TEXT,
+    status TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+    finished_at TEXT
 );
 CREATE TABLE IF NOT EXISTS markets (
     condition_id TEXT PRIMARY KEY,
@@ -37,10 +39,11 @@ CREATE TABLE IF NOT EXISTS markets (
     last_seen_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS rules_versions (
-    rules_hash TEXT PRIMARY KEY,
     condition_id TEXT NOT NULL,
+    rules_hash TEXT NOT NULL,
     rules_json TEXT NOT NULL,
-    first_seen_at TEXT NOT NULL
+    first_seen_at TEXT NOT NULL,
+    PRIMARY KEY (condition_id, rules_hash)
 );
 CREATE TABLE IF NOT EXISTS discoveries (
     run_id TEXT NOT NULL,
@@ -67,6 +70,8 @@ CREATE TABLE IF NOT EXISTS resolution_observations (
     fetched_at TEXT NOT NULL,
     status TEXT NOT NULL,
     outcome TEXT,
+    cross_check TEXT NOT NULL
+        CHECK (cross_check IN ('CONFIRMED', 'UNCHECKED', 'MISMATCH', 'NOT_APPLICABLE')),
     was_disputed INTEGER NOT NULL,
     new_version_q INTEGER NOT NULL,
     raw_json TEXT NOT NULL

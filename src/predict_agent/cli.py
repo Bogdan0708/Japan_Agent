@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from .collect import discover, poll_resolutions, record_geoblock, snapshot_eligible, start_run
-from .config import ConfigError, Settings, load_discovery_config
-from .db import connect, verify_journal
+from .collect import (
+    discover,
+    finish_run,
+    poll_resolutions,
+    record_geoblock,
+    snapshot_eligible,
+    start_run,
+)
+from .config import ConfigError, DiscoveryConfig, Settings, load_discovery_config
+from .db import connect, record_refusal, verify_journal
+from .gamma import ParseError
 from .http import FetchError, JsonClient
 from .report import render_markdown, shortlist
 from .util import utc_now
@@ -37,7 +46,7 @@ def _latest_discovery_run(conn_path: Path) -> str | None:
     try:
         row = conn.execute(
             "SELECT run_id FROM runs WHERE command IN ('discover', 'run-data') "
-            "ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            "AND status = 'COMPLETED' ORDER BY started_at DESC, rowid DESC LIMIT 1"
         ).fetchone()
         return row["run_id"] if row else None
     finally:
@@ -82,41 +91,61 @@ def main(
         print(f"policy {policy_hash[:12]} ok; journal chain {'ok' if ok else 'BROKEN'}")
         return 0 if ok else 3
     http = client or JsonClient()
-    try:
-        if args.command == "report":
-            run_id = args.run or _latest_discovery_run(settings.database_path)
-            if run_id is None:
-                print("predict-agent: no discovery run yet", file=sys.stderr)
-                return 2
-            print(_write_report(settings, settings.database_path, run_id))
-            return 0
-        conn = connect(settings.database_path)
+    if args.command == "report":
+        run_id = args.run or _latest_discovery_run(settings.database_path)
+        if run_id is None:
+            print("predict-agent: no completed discovery run yet", file=sys.stderr)
+            return 2
         try:
-            run_id = start_run(conn, args.command, policy_hash, now_fn())
-            geoblock = record_geoblock(conn, http, run_id)
-            print(f"run {run_id}; geoblock (audit only): {geoblock}")
-            if args.command in ("discover", "run-data"):
-                summary = discover(conn, http, config, run_id, now_fn())
-                print(f"seen {summary.markets_seen}, eligible {summary.eligible}")
-            if args.command == "snapshot":
-                latest = _latest_discovery_run(settings.database_path)
-                if latest is None:
-                    print("predict-agent: no discovery run yet", file=sys.stderr)
-                    return 2
-                print(f"snapshots {snapshot_eligible(conn, http, config, latest, now_fn)}")
-            if args.command == "run-data":
-                print(f"snapshots {snapshot_eligible(conn, http, config, run_id, now_fn)}")
-            if args.command in ("resolve", "run-data"):
-                print(f"resolution observations {poll_resolutions(conn, http, run_id, now_fn())}")
-        finally:
-            conn.close()
-        if args.command == "run-data":
             print(_write_report(settings, settings.database_path, run_id))
-    except FetchError as error:
-        print(f"predict-agent: fetch failed, run aborted: {error}", file=sys.stderr)
-        return 4
-    return 0
+        except ValueError as error:
+            print(f"predict-agent: {error}", file=sys.stderr)
+            return 2
+        return 0
+    conn = connect(settings.database_path)
+    try:
+        run_id = start_run(conn, args.command, policy_hash, now_fn())
+        try:
+            code = _run_steps(args.command, conn, http, config, settings, run_id, now_fn)
+        except (FetchError, ParseError) as error:
+            reason = "FETCH_ERROR" if isinstance(error, FetchError) else "PARSE_ERROR"
+            record_refusal(conn, run_id, None, args.command, reason, str(error), now_fn())
+            finish_run(conn, run_id, "FAILED", now_fn())
+            print(f"predict-agent: run {run_id} failed: {error}", file=sys.stderr)
+            return 4
+        finish_run(conn, run_id, "COMPLETED" if code == 0 else "FAILED", now_fn())
+    finally:
+        conn.close()
+    if code == 0 and args.command == "run-data":
+        print(_write_report(settings, settings.database_path, run_id))
+    return code
 
+
+def _run_steps(
+    command: str,
+    conn: sqlite3.Connection,
+    http: JsonClient,
+    config: DiscoveryConfig,
+    settings: Settings,
+    run_id: str,
+    now_fn: Callable[[], datetime],
+) -> int:
+    geoblock = record_geoblock(conn, http, run_id)
+    print(f"run {run_id}; geoblock (audit only): {geoblock}")
+    if command in ("discover", "run-data"):
+        summary = discover(conn, http, config, run_id, now_fn())
+        print(f"seen {summary.markets_seen}, eligible {summary.eligible}")
+    if command == "snapshot":
+        latest = _latest_discovery_run(settings.database_path)
+        if latest is None:
+            print("predict-agent: no completed discovery run yet", file=sys.stderr)
+            return 2
+        print(f"snapshots {snapshot_eligible(conn, http, config, latest, now_fn)}")
+    if command == "run-data":
+        print(f"snapshots {snapshot_eligible(conn, http, config, run_id, now_fn)}")
+    if command in ("resolve", "run-data"):
+        print(f"resolution observations {poll_resolutions(conn, http, run_id, now_fn())}")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

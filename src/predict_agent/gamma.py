@@ -72,9 +72,12 @@ def _optional_decimal(value: object) -> Decimal | None:
     if isinstance(value, bool):
         raise ParseError("boolean where a number was expected")
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except InvalidOperation:
         raise ParseError(f"not a number: {value!r}") from None
+    if not number.is_finite():
+        raise ParseError(f"not a finite number: {value!r}")
+    return number
 
 
 def parse_market(raw_market: Mapping[str, Any], raw_event: Mapping[str, Any]) -> MarketCandidate:
@@ -184,26 +187,38 @@ def eligibility_refusal(
 
 
 def fetch_events(client: JsonClient, config: DiscoveryConfig) -> list[dict[str, Any]]:
+    """Walk /events/keyset per tag. Offset paging is capped server-side (verified 2026-10-05:
+    offset 3000 is rejected) and politics alone had 2,484 active events, so keyset is required.
+    Still having a next_cursor after max_pages fails closed rather than reporting a partial
+    universe as complete."""
     seen: dict[str, dict[str, Any]] = {}
     for slug, _category in config.tag_categories:
-        for page in range(config.max_pages):
-            batch = client.get(
-                f"{GAMMA_URL}/events",
-                {
-                    "active": "true",
-                    "closed": "false",
-                    "tag_slug": slug,
-                    "order": "id",
-                    "ascending": "true",
-                    "limit": config.page_size,
-                    "offset": page * config.page_size,
-                },
-            )
+        cursor: str | None = None
+        for _page in range(config.max_pages):
+            params: dict[str, str | int] = {
+                "active": "true",
+                "closed": "false",
+                "tag_slug": slug,
+                "order": "id",
+                "ascending": "true",
+                "limit": config.page_size,
+            }
+            if cursor is not None:
+                params["after_cursor"] = cursor
+            payload = client.get(f"{GAMMA_URL}/events/keyset", params)
+            batch = payload.get("events") if isinstance(payload, dict) else None
             if not isinstance(batch, list):
-                raise ParseError("Gamma /events did not return a list")
+                raise ParseError("Gamma /events/keyset did not return an events list")
             for event in batch:
                 if isinstance(event, dict) and "id" in event:
                     seen.setdefault(str(event["id"]), event)
-            if len(batch) < config.page_size:
+            next_cursor = payload.get("next_cursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
                 break
+            cursor = next_cursor
+        else:
+            raise ParseError(
+                f"discovery truncated: tag {slug!r} still had more pages after "
+                f"{config.max_pages} pages of {config.page_size}; raise discovery.max_pages"
+            )
     return list(seen.values())

@@ -56,9 +56,12 @@ class BookSnapshot:
 
 def _decimal(value: object, field: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
     except InvalidOperation:
         raise ParseError(f"{field} is not a number: {value!r}") from None
+    if not number.is_finite():
+        raise ParseError(f"{field} is not a finite number: {value!r}")
+    return number
 
 
 def _levels(raw: object) -> list[Level]:
