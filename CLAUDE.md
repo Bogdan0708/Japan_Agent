@@ -27,3 +27,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Context
 
 Paper-first, human-approved investing agent. Flow: ingest (fail-closed snapshots) → structured Claude research → deterministic risk engine → immutable hash-bound ticket → Telegram approval by the named human → T212 demo/live adapter → reconciliation → append-only journal. Architecture details: `docs/ARCHITECTURE.md`; operations/cron: `docs/OPERATIONS.md`; human account tasks: `docs/ACCOUNT-SETUP.md`.
+
+## predict_agent (Polymarket paper forecaster, Phase 1)
+
+- Spec: `docs/superpowers/specs/2026-10-05-polymarket-paper-forecaster-design.md`; plans in `docs/superpowers/plans/`.
+- Separate package: `predict_agent` must never import `japan_agent` (enforced by `tests/predict/test_cli_isolation.py`). `japan_agent` is frozen.
+- Phase 1 has **no execution code**: no wallet, keys, signing, or non-GET HTTP. Never attempt to circumvent Polymarket's UK geoblock; the geoblock check is audit-only.
+- CLI: `PYTHONPATH=src python3 -m predict_agent.cli doctor|discover|snapshot|resolve|report|run-data`. Needs `config/predict-policy.json` (human-owned copy of the `.example`; code never writes it).
+- Live API quirks pinned in `tests/predict/fixtures.py`: JSON-string list fields, worst-first books on both sides, resolution rows without `payouts`, closed Gamma markets only returned with `closed=true`, and the CLOB book `timestamp` is the last-change time (a quiet book is still current — never treat an old one as stale).
