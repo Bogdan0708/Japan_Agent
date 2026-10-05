@@ -113,15 +113,20 @@ class TradeTests(PaperTestCase):
         self.assertIn("discovery run", payload["detail"])
 
     def test_open_statuses_initialized_and_active_do_not_refuse(self) -> None:
-        seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
-        seed_observation(self.conn, None, status="initialized", cross_check="NOT_APPLICABLE",
-                        fetched_at=NOW + timedelta(seconds=10))
-        summary = trade_ready(self.conn, DECIDE_AT)
-        self.assertEqual((summary.traded, summary.refused), (2, {}))
-        seed_observation(self.conn, None, status="active", cross_check="NOT_APPLICABLE",
-                        fetched_at=NOW + timedelta(seconds=11))
-        summary = trade_ready(self.conn, DECIDE_AT)
-        self.assertEqual((summary.traded, summary.refused), (0, {}))
+        for status in ("initialized", "active"):
+            with self.subTest(status=status):
+                self.tearDown()
+                self.setUp()
+                seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+                seed_observation(
+                    self.conn,
+                    None,
+                    status=status,
+                    cross_check="NOT_APPLICABLE",
+                    fetched_at=NOW + timedelta(seconds=10),
+                )
+                summary = trade_ready(self.conn, DECIDE_AT)
+                self.assertEqual((summary.traded, summary.refused), (2, {}))
 
     def test_resolution_started_refuses(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
