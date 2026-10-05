@@ -70,6 +70,8 @@ def load_discovery_config(path: Path) -> tuple[DiscoveryConfig, str]:
         raw = json.loads(text)["discovery"]
     except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise ConfigError(f"{path} must be JSON with a 'discovery' object") from error
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: 'discovery' must be an object")
     pairs = raw.get("tag_categories")
     if not isinstance(pairs, list) or not pairs:
         raise ConfigError("discovery.tag_categories must be a non-empty list")

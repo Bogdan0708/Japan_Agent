@@ -7,7 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from predict_agent.db import append_journal, connect, transaction, verify_journal
+from predict_agent.db import (
+    SCHEMA_VERSION,
+    append_journal,
+    connect,
+    transaction,
+    verify_journal,
+)
 from tests.predict.fixtures import NOW
 
 
@@ -28,7 +34,7 @@ class DbTests(unittest.TestCase):
     def test_reconnect_is_idempotent(self) -> None:
         connect(self.path).close()
         version = self.conn.execute("SELECT version FROM schema_version").fetchall()
-        self.assertEqual([row["version"] for row in version], [1])
+        self.assertEqual([row["version"] for row in version], [SCHEMA_VERSION])
 
     def test_journal_chain_verifies_and_detects_tampering(self) -> None:
         with transaction(self.conn):

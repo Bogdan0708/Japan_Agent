@@ -11,7 +11,7 @@ from typing import Any
 
 from .util import canonical_json, isoformat, sha256_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GENESIS_HASH = "0" * 64
 
 SCHEMA = """
@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS runs (
     policy_hash TEXT NOT NULL,
     geoblock_json TEXT,
     status TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
-    finished_at TEXT
+    finished_at TEXT,
+    source_run_id TEXT
 );
 CREATE TABLE IF NOT EXISTS markets (
     condition_id TEXT PRIMARY KEY,
@@ -48,6 +49,15 @@ CREATE TABLE IF NOT EXISTS rules_versions (
 CREATE TABLE IF NOT EXISTS discoveries (
     run_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    category TEXT NOT NULL,
+    yes_token_id TEXT NOT NULL,
+    no_token_id TEXT NOT NULL,
+    rules_hash TEXT NOT NULL,
+    fees_enabled INTEGER NOT NULL,
+    fee_schedule_json TEXT,
+    observed_at TEXT NOT NULL,
     PRIMARY KEY (run_id, condition_id)
 );
 CREATE TABLE IF NOT EXISTS book_snapshots (
@@ -55,6 +65,7 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     run_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('YES', 'NO')),
     observed_at TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
@@ -67,7 +78,9 @@ CREATE TABLE IF NOT EXISTS resolution_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
+    resolution_fetched_at TEXT NOT NULL,
+    gamma_fetched_at TEXT,
+    gamma_json TEXT,
     status TEXT NOT NULL,
     outcome TEXT,
     cross_check TEXT NOT NULL
@@ -101,6 +114,12 @@ CREATE TRIGGER IF NOT EXISTS rules_no_update BEFORE UPDATE ON rules_versions
 BEGIN SELECT RAISE(ABORT, 'rules versions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS rules_no_delete BEFORE DELETE ON rules_versions
 BEGIN SELECT RAISE(ABORT, 'rules versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS discoveries_no_update BEFORE UPDATE ON discoveries
+BEGIN SELECT RAISE(ABORT, 'discoveries are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS discoveries_no_delete BEFORE DELETE ON discoveries
+BEGIN SELECT RAISE(ABORT, 'discoveries are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS observations_no_update BEFORE UPDATE ON resolution_observations
+BEGIN SELECT RAISE(ABORT, 'resolution observations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS snapshots_no_update BEFORE UPDATE ON book_snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS snapshots_no_delete BEFORE DELETE ON book_snapshots

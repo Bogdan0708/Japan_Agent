@@ -12,6 +12,8 @@ from .util import from_epoch_ms, isoformat, sha256_json
 
 CLOB_URL = "https://clob.polymarket.com"
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=5)
+MIN_TIMESTAMP_MS = 1_577_836_800_000  # 2020-01-01T00:00:00Z
+MAX_TIMESTAMP_MS = 4_102_444_800_000  # 2100-01-01T00:00:00Z
 
 
 @dataclass(frozen=True)
@@ -81,10 +83,17 @@ def _levels(raw: object) -> list[Level]:
 
 def parse_book(raw: Mapping[str, Any], fetched_at: datetime) -> BookSnapshot:
     try:
-        timestamp = raw["timestamp"]
-        observed_at = from_epoch_ms(timestamp)
+        millis = int(raw["timestamp"])
     except (KeyError, ValueError, TypeError):
         raise ParseError("book timestamp missing or malformed") from None
+    if not MIN_TIMESTAMP_MS <= millis <= MAX_TIMESTAMP_MS:
+        raise ParseError(f"book timestamp out of range: {millis}")
+    observed_at = from_epoch_ms(millis)
+    tick_size = _decimal(raw.get("tick_size"), "tick_size")
+    min_order_size = _decimal(raw.get("min_order_size"), "min_order_size")
+    # min_order_size "0" is served live for some liquid markets; only negatives are invalid.
+    if tick_size <= 0 or min_order_size < 0:
+        raise ParseError(f"invalid tick_size {tick_size} or min_order_size {min_order_size}")
     return BookSnapshot(
         condition_id=str(raw.get("market") or ""),
         token_id=str(raw.get("asset_id") or ""),
@@ -93,16 +102,18 @@ def parse_book(raw: Mapping[str, Any], fetched_at: datetime) -> BookSnapshot:
         book_hash=str(raw.get("hash") or ""),
         bids=tuple(sorted(_levels(raw.get("bids")), key=lambda lvl: lvl.price, reverse=True)),
         asks=tuple(sorted(_levels(raw.get("asks")), key=lambda lvl: lvl.price)),
-        tick_size=_decimal(raw.get("tick_size"), "tick_size"),
-        min_order_size=_decimal(raw.get("min_order_size"), "min_order_size"),
+        tick_size=tick_size,
+        min_order_size=min_order_size,
     )
 
 
 def book_refusal(
     snapshot: BookSnapshot, expected_condition_id: str, expected_token_id: str
 ) -> str | None:
-    # observed_at is the book's last-change time, so an old value only means a quiet
-    # book; it is current as of fetched_at. Only a last change in the future is refused.
+    # Observed behaviour (2026-10-05, not documented): the book timestamp stayed fixed while
+    # the hash was unchanged, so it appears to be the last-change time. An old value is
+    # therefore not treated as stale here; both times are stored and freshness from
+    # fetched_at is enforced at decision time (Plan 3). Only a future timestamp is refused.
     if (
         snapshot.condition_id != expected_condition_id
         or snapshot.token_id != expected_token_id

@@ -75,5 +75,21 @@ class NonFiniteBookTests(unittest.TestCase):
             parsed(asks=[{"price": "NaN", "size": "5"}])
 
 
+class BookValidationTests(unittest.TestCase):
+    def test_non_positive_tick_or_min_size_rejected(self) -> None:
+        for overrides in ({"tick_size": "0"}, {"min_order_size": "-2"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ParseError):
+                parsed(**overrides)
+
+    def test_zero_min_order_size_is_accepted(self) -> None:
+        # Observed live 2026-10-05: 13 liquid markets serve min_order_size "0" (Gamma null).
+        self.assertEqual(parsed(min_order_size="0").min_order_size, Decimal("0"))
+
+    def test_out_of_range_timestamp_is_parse_error(self) -> None:
+        for stamp in ("9" * 30, "-5", "0"):
+            with self.subTest(stamp=stamp), self.assertRaises(ParseError):
+                parsed(timestamp=stamp)
+
+
 if __name__ == "__main__":
     unittest.main()

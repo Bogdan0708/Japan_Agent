@@ -140,11 +140,12 @@ def _run_steps(
         if latest is None:
             print("predict-agent: no completed discovery run yet", file=sys.stderr)
             return 2
-        print(f"snapshots {snapshot_eligible(conn, http, config, latest, now_fn)}")
+        conn.execute("UPDATE runs SET source_run_id = ? WHERE run_id = ?", (latest, run_id))
+        print(f"snapshots {snapshot_eligible(conn, http, latest, run_id, now_fn)}")
     if command == "run-data":
-        print(f"snapshots {snapshot_eligible(conn, http, config, run_id, now_fn)}")
+        print(f"snapshots {snapshot_eligible(conn, http, run_id, run_id, now_fn)}")
     if command in ("resolve", "run-data"):
-        print(f"resolution observations {poll_resolutions(conn, http, run_id, now_fn())}")
+        print(f"resolution observations {poll_resolutions(conn, http, run_id, now_fn)}")
     return 0
 
 if __name__ == "__main__":

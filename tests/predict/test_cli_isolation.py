@@ -88,6 +88,7 @@ class CliTests(unittest.TestCase):
             "tag_slug=economics": [{"events": []}],
             "tag_slug=politics": [{"events": [gamma_event([gamma_market()])]}],
             "/v2/resolutions": [{"data": [resolution_row()]}, {"data": [resolution_row()]}],
+            "/markets?": [[gamma_market()], []],
             f"token_id={YES_TOKEN}": [clob_book()],
             f"token_id={NO_TOKEN}": [clob_book(asset_id=NO_TOKEN)],
         }

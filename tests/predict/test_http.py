@@ -77,5 +77,12 @@ class ReadPhaseErrorTests(unittest.TestCase):
         self.assertEqual(len(sleeps), 2)
 
 
+class RepeatedParamTests(unittest.TestCase):
+    def test_sequence_params_repeat_keys(self) -> None:
+        opener = ScriptedOpener([[]])
+        client(opener, []).get("https://h/m", [("id", "a"), ("id", "b"), ("closed", "true")])
+        self.assertEqual(opener.requests, ["https://h/m?id=a&id=b&closed=true"])
+
+
 if __name__ == "__main__":
     unittest.main()

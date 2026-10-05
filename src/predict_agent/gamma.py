@@ -132,7 +132,7 @@ def fee_rate(schedule: object) -> Decimal | None:
         rate = Decimal(str(schedule.get("rate")))
     except InvalidOperation:
         return None
-    if not Decimal("0") <= rate < Decimal("1"):
+    if not rate.is_finite() or not Decimal("0") <= rate < Decimal("1"):
         return None
     return rate
 
@@ -143,6 +143,22 @@ def rules_payload(candidate: MarketCandidate) -> dict[str, str | None]:
         "rules_text": candidate.rules_text,
         "resolution_source": candidate.resolution_source,
         "end_date": isoformat(candidate.end_date) if candidate.end_date else None,
+    }
+
+
+def rules_payload_from_raw(raw_market: Mapping[str, Any]) -> dict[str, str | None]:
+    """Rules payload straight from a Gamma market object (used when re-checking tracked
+    markets outside discovery). Normalised exactly like rules_payload so hashes agree."""
+    end_raw = raw_market.get("endDate")
+    try:
+        end_date = parse_datetime(end_raw) if isinstance(end_raw, str) and end_raw else None
+    except ValueError:
+        raise ParseError(f"bad endDate {end_raw!r}") from None
+    return {
+        "question": str(raw_market.get("question") or ""),
+        "rules_text": str(raw_market.get("description") or ""),
+        "resolution_source": str(raw_market.get("resolutionSource") or ""),
+        "end_date": isoformat(end_date) if end_date else None,
     }
 
 

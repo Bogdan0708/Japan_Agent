@@ -12,6 +12,10 @@ from .http import JsonClient
 DATA_API_URL = "https://data-api.polymarket.com"
 OPEN_STATUSES = frozenset({"initialized", "posed", "active"})
 BATCH = 20
+# Payouts are micro-USDC per share (a full payout is 1_000_000). Not stated by Polymarket's
+# docs; observed 2026-10-05 on 24 live resolved binary markets ([1000000, 0] / [0, 1000000],
+# all agreeing with Gamma). No live 50/50 example has been seen, so HALF via payouts is
+# unverified. Any other vector maps to UNKNOWN (fail closed).
 MICRO = 1_000_000
 LEAN_THRESHOLD = Decimal("0.95")
 _UMA_PRICES = {
@@ -20,7 +24,11 @@ _UMA_PRICES = {
     "500000000000000000": "HALF",
 }
 _PAYOUTS = {(MICRO, 0): "YES", (0, MICRO): "NO", (MICRO // 2, MICRO // 2): "HALF"}
-_GAMMA_PRICES = {("1", "0"): "YES", ("0", "1"): "NO", ("0.5", "0.5"): "HALF"}
+_GAMMA_PRICES = {
+    (Decimal(1), Decimal(0)): "YES",
+    (Decimal(0), Decimal(1)): "NO",
+    (Decimal("0.5"), Decimal("0.5")): "HALF",
+}
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,8 @@ def parse_resolution(row: Mapping[str, Any]) -> ResolutionState:
 
 
 def gamma_outcome(outcome_prices: object) -> str | None:
+    """Exact final outcome from Gamma outcomePrices, comparing decimal values (so "1.0"
+    equals "1"); None for anything that is not exactly 1/0, 0/1 or 0.5/0.5."""
     if not isinstance(outcome_prices, str):
         return None
     try:
@@ -68,7 +78,13 @@ def gamma_outcome(outcome_prices: object) -> str | None:
         return None
     if not isinstance(prices, list) or len(prices) != 2:
         return None
-    return _GAMMA_PRICES.get((str(prices[0]), str(prices[1])))
+    try:
+        pair = (Decimal(str(prices[0])), Decimal(str(prices[1])))
+    except InvalidOperation:
+        return None
+    if not all(value.is_finite() for value in pair):
+        return None
+    return _GAMMA_PRICES.get(pair)
 
 
 def _gamma_lean(outcome_prices: object) -> str | None:
@@ -129,17 +145,21 @@ def fetch_resolutions(client: JsonClient, condition_ids: list[str]) -> dict[str,
     return rows
 
 
-def fetch_closed_gamma_markets(
+def fetch_gamma_markets(
     client: JsonClient, condition_ids: list[str]
 ) -> dict[str, dict[str, Any]]:
+    """Gamma /markets by condition id. Verified live 2026-10-05: ids must be repeated
+    parameters (a comma-joined list matches nothing), the default returns only open markets
+    and closed=true only closed ones, so each batch is fetched twice."""
     rows: dict[str, dict[str, Any]] = {}
     for batch in _batches(condition_ids):
-        payload = client.get(
-            f"{GAMMA_URL}/markets", {"condition_ids": ",".join(batch), "closed": "true"}
-        )
-        if not isinstance(payload, list):
-            raise ParseError("Gamma /markets did not return a list")
-        for market in payload:
-            if isinstance(market, dict) and isinstance(market.get("conditionId"), str):
-                rows[market["conditionId"]] = market
+        ids: list[tuple[str, str | int]] = [("condition_ids", cid) for cid in batch]
+        extras: tuple[list[tuple[str, str | int]], ...] = ([], [("closed", "true")])
+        for extra in extras:
+            payload = client.get(f"{GAMMA_URL}/markets", ids + extra)
+            if not isinstance(payload, list):
+                raise ParseError("Gamma /markets did not return a list")
+            for market in payload:
+                if isinstance(market, dict) and isinstance(market.get("conditionId"), str):
+                    rows[market["conditionId"]] = market
     return rows

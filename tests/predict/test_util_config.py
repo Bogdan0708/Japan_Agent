@@ -91,5 +91,14 @@ class NonFiniteConfigTests(unittest.TestCase):
                 load_discovery_config(path)
 
 
+class DiscoveryShapeTests(unittest.TestCase):
+    def test_discovery_not_object_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.json"
+            path.write_text('{"discovery": []}', encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "discovery"):
+                load_discovery_config(path)
+
+
 if __name__ == "__main__":
     unittest.main()

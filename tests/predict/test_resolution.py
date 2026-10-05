@@ -4,7 +4,7 @@ import unittest
 
 from predict_agent.http import JsonClient
 from predict_agent.resolution import (
-    fetch_closed_gamma_markets,
+    fetch_gamma_markets,
     fetch_resolutions,
     gamma_outcome,
     parse_resolution,
@@ -92,13 +92,30 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(len(opener.requests), 2)
         self.assertIn("/v2/resolutions?condition=", opener.requests[0])
 
-    def test_fetch_closed_gamma_markets_passes_closed_true(self) -> None:
-        opener = ScriptedOpener([[{"conditionId": CONDITION_ID, "outcomePrices": '["0", "1"]'}]])
-        rows = fetch_closed_gamma_markets(
-            JsonClient(opener=opener, sleep=lambda _: None), [CONDITION_ID]
+    def test_fetch_gamma_markets_repeats_ids_and_reads_open_and_closed(self) -> None:
+        other = "0x" + "e" * 64
+        opener = ScriptedOpener(
+            [
+                [{"conditionId": CONDITION_ID, "closed": False}],
+                [{"conditionId": other, "closed": True}],
+            ]
         )
-        self.assertIn(CONDITION_ID, rows)
-        self.assertIn("closed=true", opener.requests[0])
+        rows = fetch_gamma_markets(
+            JsonClient(opener=opener, sleep=lambda _: None), [CONDITION_ID, other]
+        )
+        self.assertEqual(set(rows), {CONDITION_ID, other})
+        self.assertEqual(opener.requests[0].count("condition_ids="), 2)
+        self.assertNotIn("%2C", opener.requests[0])
+        self.assertNotIn("closed=", opener.requests[0])
+        self.assertIn("closed=true", opener.requests[1])
+
+
+class DecimalSpellingTests(unittest.TestCase):
+    def test_gamma_outcome_compares_decimal_values(self) -> None:
+        self.assertEqual(gamma_outcome('["1.0", "0.0"]'), "YES")
+        self.assertEqual(gamma_outcome('["0.00", "1"]'), "NO")
+        self.assertEqual(gamma_outcome('["0.50", "0.5"]'), "HALF")
+        self.assertIsNone(gamma_outcome('["NaN", "0"]'))
 
 
 if __name__ == "__main__":

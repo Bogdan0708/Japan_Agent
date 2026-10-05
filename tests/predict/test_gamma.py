@@ -15,6 +15,8 @@ from predict_agent.gamma import (
     fetch_events,
     parse_market,
     rules_hash,
+    rules_payload,
+    rules_payload_from_raw,
 )
 from predict_agent.http import JsonClient
 from tests.predict.fakes import ScriptedOpener
@@ -155,6 +157,22 @@ class RobustnessTests(unittest.TestCase):
         opener = ScriptedOpener([{"events": full, "next_cursor": "more"}])
         with self.assertRaisesRegex(ParseError, "truncated"):
             fetch_events(JsonClient(opener=opener, sleep=lambda _: None), tiny)
+
+
+class CorrectionPassTests(unittest.TestCase):
+    def test_nan_fee_rate_is_unknown(self) -> None:
+        schedule = {"exponent": 1, "rate": "NaN", "takerOnly": True}
+        self.assertIsNone(fee_rate(schedule))
+        c = candidate(feeSchedule=schedule)
+        self.assertEqual(eligibility_refusal(c, CONFIG, NOW), "FEE_UNKNOWN")
+
+    def test_raw_rules_payload_matches_candidate_payload(self) -> None:
+        market = gamma_market()
+        self.assertEqual(rules_payload_from_raw(market), rules_payload(candidate()))
+
+    def test_raw_rules_payload_rejects_bad_end_date(self) -> None:
+        with self.assertRaises(ParseError):
+            rules_payload_from_raw(gamma_market(endDate="not a date"))
 
 
 if __name__ == "__main__":

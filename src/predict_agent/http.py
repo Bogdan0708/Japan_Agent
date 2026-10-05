@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 USER_AGENT = "predict-agent/0.1 (read-only research)"
@@ -67,7 +67,11 @@ class JsonClient:
         self._max_retries = max_retries
         self._backoff_base = backoff_base
 
-    def get(self, url: str, params: Mapping[str, str | int] | None = None) -> Any:
+    def get(
+        self,
+        url: str,
+        params: Mapping[str, str | int] | Sequence[tuple[str, str | int]] | None = None,
+    ) -> Any:
         full_url = f"{url}?{urllib.parse.urlencode(params)}" if params else url
         request = urllib.request.Request(
             full_url,
