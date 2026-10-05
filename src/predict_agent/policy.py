@@ -131,7 +131,7 @@ def _gate(inputs: PolicyInputs, params: PolicyParams) -> Refusal | None:
     if not inputs.eligible:
         return Refusal("ELIGIBILITY_LOST", "not in the latest completed discovery run")
     if inputs.resolution_started:
-        return Refusal("RESOLUTION_STARTED", "resolution is no longer posed")
+        return Refusal("RESOLUTION_STARTED", "a resolution observation is no longer open")
     if inputs.already_traded:
         return Refusal("ALREADY_TRADED", "one entry per market per portfolio, ever")
     if CONFIDENCE_RANK.get(forecast.confidence or "", -1) < CONFIDENCE_RANK[
@@ -214,6 +214,7 @@ def decide(inputs: PolicyInputs, params: PolicyParams) -> Trade | Refusal:
     if trades:
         return max(trades, key=lambda trade: (trade.edge, trade.outcome == "YES"))
     refusals = [result for result in results if isinstance(result, Refusal)]
-    # A side with no edge at all says least; report the side that got further (YES first).
+    # A side with no edge at all says least: report the first refusal that is not NO_EDGE
+    # (YES is checked first); if both are NO_EDGE, report the first.
     telling = [r for r in refusals if r.reason != "NO_EDGE"] or refusals
     return Refusal(telling[0].reason, "; ".join(f"{r.reason}: {r.detail}" for r in refusals))

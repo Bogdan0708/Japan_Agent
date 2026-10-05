@@ -43,11 +43,6 @@ class FeeTests(unittest.TestCase):
 
 
 class WalkTests(unittest.TestCase):
-    def walk(self, levels: list[AskLevel], budget: str, limit: str = "0.99",
-             rate: str = "0") -> object:
-        return walk_asks(levels, budget=D(budget), fee_rate=D(rate),
-                         limit_price=D(limit), tick_size=TICK)
-
     def test_spec_worked_example_fills_forty_shares_from_a_fifty_share_book(self) -> None:
         # Spec §8: budget capped to $20 at ask 0.50 buys 40 of the 50 recorded shares.
         walk = walk_asks(book(("0.50", "50")), budget=D("20"), fee_rate=D("0"),
