@@ -152,9 +152,22 @@ def take_baseline(
     return True
 
 
+def _string_leaves(value: object) -> list[str]:
+    """Every string inside `value` as raw text (dict keys excluded). JSON-encoding the
+    value first would escape non-ASCII characters and newlines and hide phrases."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _string_leaves(item)]
+    if isinstance(value, list | tuple):
+        return [leaf for item in value for leaf in _string_leaves(item)]
+    return []
+
+
 def _exposure_texts(outcome: ResearchOutcome) -> list[str]:
-    texts = [outcome.final_text, canonical_json(outcome.structured_output)]
-    texts += [canonical_json(event.get("output")) for event in outcome.transcript]
+    texts = [outcome.final_text, *_string_leaves(outcome.structured_output)]
+    for event in outcome.transcript:
+        texts += _string_leaves(event.get("output"))
     return texts
 
 

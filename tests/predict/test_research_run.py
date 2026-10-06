@@ -174,6 +174,16 @@ class HappyPathTests(ResearchRunTestCase):
             "SELECT content FROM artifacts WHERE kind = 'tool_transcript'"))
         self.assertIn(snippet, transcript)
 
+    def test_exposure_scan_reads_raw_text_not_json_escaped_text(self) -> None:
+        snippet = {"event": "result", "tool": "WebSearch", "input": {"query": "q"},
+                   "output": {"content": "Shares trade at 35\u00a2 a share; bookmakers\u2019 odds\n"
+                              "of a win"}}
+        runner = FakeRunner(outcome(transcript=outcome().transcript + (snippet,)))
+        self.run_day(runner)
+        flags = json.loads(self.scalar("SELECT body_json FROM forecasts"))["exposure_flags"]
+        self.assertIn("phrase:cents_per_share", flags)
+        self.assertIn("phrase:odds_of", flags)
+
     def test_abstention_is_recorded_baselined_and_refused(self) -> None:
         runner = FakeRunner(outcome(structured_output=forecast_output(
             abstain=True, abstain_reason="rules ambiguous", p_low=None, p_mid=None,
