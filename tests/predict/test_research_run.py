@@ -17,13 +17,19 @@ from unittest import mock
 from predict_agent.cash import LedgerError
 from predict_agent.cli import main
 from predict_agent.db import connect
-from predict_agent.forecasts import start_attempt
+from predict_agent.budget import INTERRUPTED
+from predict_agent.forecasts import fail_attempt, start_attempt
 from predict_agent.http import JsonClient
 from predict_agent.invariants import verify_ledger
 from predict_agent.policy_params import parse_policy
 from predict_agent.research.config import parse_research
 from predict_agent.research.sdk import ResearchOutcome, ResearchRequest
-from predict_agent.research_run import ResearchSummary, run_research_day
+from predict_agent.research_run import (
+    MAX_FAILED_ENTRY_ATTEMPTS,
+    ResearchSummary,
+    candidates,
+    run_research_day,
+)
 from tests.predict.fakes import RoutedOpener
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN, clob_book
 from tests.predict.trade_fixtures import seed_discovery, seed_tradeable_market
@@ -230,6 +236,86 @@ class FailureTests(ResearchRunTestCase):
         summary = self.run_day(runner, book_queue=[])
         self.assertEqual(dict(summary.failed), {"UNFETCHED_CITATION": 1})
         self.assertEqual(self.scalar("SELECT status FROM research_attempts"), "FAILED")
+
+
+class SystemicFailureTests(ResearchRunTestCase):
+    def test_toolset_mismatch_stops_the_run_after_one_attempt(self) -> None:
+        self.add_markets(*OTHER[:2])
+        bad = outcome(error="TOOLSET_MISMATCH", cost_usd=None, structured_output=None)
+        runner = FakeRunner(bad, bad, bad)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 1)
+        self.assertEqual(dict(summary.skipped), {"ABORTED_TOOLSET_MISMATCH": 2})
+        self.assertEqual(dict(summary.failed), {"TOOLSET_MISMATCH": 1})
+
+    def test_hook_error_stops_the_run(self) -> None:
+        self.add_markets(*OTHER[:2])
+        bad = outcome(error="HOOK_ERROR", cost_usd=None, structured_output=None)
+        runner = FakeRunner(bad, bad, bad)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 1)
+        self.assertEqual(dict(summary.skipped), {"ABORTED_HOOK_ERROR": 2})
+
+    def test_two_consecutive_sdk_errors_stop_the_run(self) -> None:
+        self.add_markets(*OTHER[:3])
+        bad = outcome(error="SDK_ERROR", cost_usd=None, structured_output=None)
+        runner = FakeRunner(bad, bad, bad, bad)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 2)
+        self.assertEqual(dict(summary.skipped), {"ABORTED_SDK_ERROR": 2})
+        self.assertEqual(dict(summary.failed), {"SDK_ERROR": 2})
+
+    def test_a_single_sdk_error_between_successes_does_not_stop_the_run(self) -> None:
+        self.add_markets(*OTHER[:2])
+        bad = outcome(error="SDK_ERROR", cost_usd=None, structured_output=None)
+        runner = FakeRunner(outcome(), bad, outcome())
+        summary = self.run_day(runner, book_queue=books(self.markets[0]) + books(self.markets[2]))
+        self.assertEqual(len(runner.requests), 3)
+        self.assertEqual(dict(summary.skipped), {})
+
+
+class RetryLimitTests(ResearchRunTestCase):
+    def failed_attempts(self, cohort: str, condition_id: str, *errors: str) -> None:
+        for index, error in enumerate(errors):
+            at = NOW + timedelta(minutes=index + 1)
+            attempt = start_attempt(self.conn, cohort, condition_id, "entry", at)
+            fail_attempt(self.conn, attempt, Decimal("1.00"), error, at)
+
+    def test_markets_with_repeated_failures_are_not_candidates(self) -> None:
+        self.assertEqual(MAX_FAILED_ENTRY_ATTEMPTS, 2)
+        cohort = self.run_day(FakeRunner(), book_queue=books()).cohort_id
+        self.add_markets(*OTHER[:3])
+        self.failed_attempts(cohort, OTHER[0], "SDK_ERROR", "NO_RESULT")
+        self.failed_attempts(cohort, OTHER[1], "SDK_ERROR", INTERRUPTED)
+        self.failed_attempts(cohort, OTHER[2], INTERRUPTED, INTERRUPTED, "SDK_ERROR")
+        rows = candidates(self.conn, cohort, NOW + timedelta(hours=2), 48)
+        self.assertEqual([r["condition_id"] for r in rows], [OTHER[1], OTHER[2]])
+
+
+class StaleDiscoveryTests(ResearchRunTestCase):
+    def test_discovery_older_than_24_hours_researches_nothing(self) -> None:
+        runner = FakeRunner()
+        summary = self.run_day(runner, book_queue=[], start=NOW + timedelta(hours=24))
+        self.assertEqual(len(runner.requests), 0)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 0)
+        self.assertEqual(dict(summary.skipped), {"STALE_DISCOVERY": 1})
+        refusal = self.conn.execute(
+            "SELECT condition_id, stage FROM refusals WHERE reason_code = 'STALE_DISCOVERY'"
+        ).fetchall()
+        self.assertEqual([tuple(r) for r in refusal], [(None, "research")])
+
+    def test_discovery_within_24_hours_is_researched(self) -> None:
+        runner = FakeRunner()
+        summary = self.run_day(runner, book_queue=books(), start=NOW + timedelta(hours=22))
+        self.assertEqual((len(runner.requests), summary.forecasts), (1, 1))
+        self.assertEqual(dict(summary.skipped), {})
+
+    def test_stale_discovery_still_resumes_baselines(self) -> None:
+        self.run_day(FakeRunner(), book_queue=books(crossed=True) + books(crossed=True))
+        later = self.run_day(FakeRunner(), book_queue=[], start=NOW + timedelta(hours=30))
+        self.assertEqual(later.no_timely_baseline, 1)
+        self.assertEqual(dict(later.skipped), {"STALE_DISCOVERY": 1})
 
 
 class BudgetTests(ResearchRunTestCase):

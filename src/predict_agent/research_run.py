@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .artifacts import store_artifact
-from .budget import budget_refusal, day_usage, recover_interrupted_attempts
+from .budget import INTERRUPTED, budget_refusal, day_usage, recover_interrupted_attempts
 from .cash import LedgerError
 from .cohorts import CohortIdentity, ensure_cohort
 from .collect import finish_run, snapshot_book, start_run
@@ -50,6 +50,13 @@ from .research.sdk import ResearchOutcome, ResearchRequest
 from .util import canonical_json, parse_datetime
 
 ResearchRunner = Callable[[ResearchRequest], ResearchOutcome]
+
+MAX_FAILED_ENTRY_ATTEMPTS = 2
+MAX_DISCOVERY_AGE = timedelta(hours=24)
+# Failures of the setup rather than of one market: no point burning an attempt on every
+# remaining candidate (SDK_ERROR only when it repeats).
+SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
+SDK_ERROR_STREAK = 2
 
 
 @dataclass
@@ -88,7 +95,9 @@ def candidates(
     conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
 ) -> list[sqlite3.Row]:
     """Markets of the latest completed discovery run that this cohort has not forecast and
-    that do not close within the policy's minimum time, in condition-id order."""
+    that do not close within the policy's minimum time, in condition-id order. A market
+    with MAX_FAILED_ENTRY_ATTEMPTS or more FAILED entry attempts for this cohort is left
+    out; attempts closed as INTERRUPTED (a crash, not a verdict on the market) do not count."""
     run_id = latest_discovery_run(conn)
     if run_id is None:
         return []
@@ -98,8 +107,11 @@ def candidates(
         "AND r.rules_hash = d.rules_hash "
         "WHERE d.run_id = ? AND NOT EXISTS (SELECT 1 FROM forecasts f "
         "WHERE f.cohort_id = ? AND f.condition_id = d.condition_id AND f.kind = 'entry') "
+        "AND (SELECT COUNT(*) FROM research_attempts a WHERE a.cohort_id = ? "
+        "AND a.condition_id = d.condition_id AND a.kind = 'entry' AND a.status = 'FAILED' "
+        "AND COALESCE(a.error, '') != ?) < ? "
         "ORDER BY d.condition_id",
-        (run_id, cohort_id),
+        (run_id, cohort_id, cohort_id, INTERRUPTED, MAX_FAILED_ENTRY_ATTEMPTS),
     ).fetchall()
     horizon = now + timedelta(hours=min_hours_to_close)
     selected = []
@@ -275,6 +287,16 @@ def resume_forecasts(
                 summary.no_timely_baseline += 1
 
 
+def _discovery_is_stale(conn: sqlite3.Connection, now: datetime) -> bool:
+    run_id = latest_discovery_run(conn)
+    if run_id is None:
+        return False
+    started = conn.execute(
+        "SELECT started_at FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()["started_at"]
+    return now - parse_datetime(started) > MAX_DISCOVERY_AGE
+
+
 def run_research_day(
     conn: sqlite3.Connection,
     client: JsonClient,
@@ -302,7 +324,14 @@ def run_research_day(
         resume_forecasts(conn, client, run_id, summary, now_fn)
         summary.traded += trade_ready(conn, now_fn()).traded
         stop: str | None = None
-        for row in candidates(conn, cohort_id, now_fn(), policy.min_hours_to_close):
+        pending = candidates(conn, cohort_id, now_fn(), policy.min_hours_to_close)
+        if _discovery_is_stale(conn, now_fn()):
+            record_refusal(conn, run_id, None, "research", "STALE_DISCOVERY",
+                           "the latest discovery run is older than 24 hours", now_fn())
+            summary.skipped["STALE_DISCOVERY"] = 1
+            pending = []
+        sdk_errors = 0
+        for index, row in enumerate(pending):
             if stop is None:
                 stop = budget_refusal(
                     day_usage(conn, now_fn(), research.per_forecast_usd),
@@ -318,8 +347,15 @@ def run_research_day(
             forecast_id, failure = research_market(conn, runner, cohort_id, row, research,
                                                    run_id, now_fn)
             if forecast_id is None:
-                summary.failed[failure or "UNKNOWN"] += 1
+                code = failure or "UNKNOWN"
+                summary.failed[code] += 1
+                sdk_errors = sdk_errors + 1 if code == "SDK_ERROR" else 0
+                if code in SYSTEMIC_FAILURES or sdk_errors >= SDK_ERROR_STREAK:
+                    if len(pending) - index - 1:
+                        summary.skipped["ABORTED_" + code] += len(pending) - index - 1
+                    break
                 continue
+            sdk_errors = 0
             summary.forecasts += 1
             abstained = conn.execute(
                 "SELECT abstained FROM forecasts WHERE forecast_id = ?", (forecast_id,)
