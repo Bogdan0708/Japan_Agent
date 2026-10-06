@@ -25,6 +25,7 @@ from .paper import trade_ready
 from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
 from .research.config import load_research_config
+from .research.sdk import ResearchUnavailable, load_sdk
 from .settlement import settle_open_tickets
 from .util import utc_now
 
@@ -96,7 +97,12 @@ def main(
         except ConfigError as error:
             print(f"predict-agent: {error}", file=sys.stderr)
             return 2
-        print(f"research: model {research.model}")
+        try:
+            load_sdk()
+            sdk_state = "installed"
+        except ResearchUnavailable:
+            sdk_state = "not installed (research disabled)"
+        print(f"research: model {research.model}; Claude Agent SDK {sdk_state}")
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)

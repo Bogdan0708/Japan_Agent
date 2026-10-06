@@ -139,13 +139,13 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("no 'research' section", err.getvalue())
 
-    def test_doctor_reports_the_research_model(self) -> None:
+    def test_doctor_reports_the_research_model_and_sdk_state(self) -> None:
         shutil.copy(EXAMPLE, self.path)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             code = main(["doctor"], root=self.root)
         self.assertEqual(code, 0, out.getvalue())
-        self.assertIn("research: model claude-opus-5-5", out.getvalue())
+        self.assertIn("research: model claude-opus-5-5; Claude Agent SDK", out.getvalue())
 
 
 if __name__ == "__main__":
