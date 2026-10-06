@@ -73,6 +73,10 @@ class ParseResearchTests(unittest.TestCase):
             "domain with path": broken(blocked_domains=["polymarket.com/x"]),
             "empty scoring version": broken(scoring_version=""),
             "generation zero": broken(generation=0),
+            "domain with trailing newline": broken(blocked_domains=["polymarket.com\n"]),
+            "uppercase domain": broken(blocked_domains=["Polymarket.com"]),
+            "domain with trailing dot": broken(blocked_domains=["polymarket.com."]),
+            "padded domain": broken(blocked_domains=[" polymarket.com"]),
         }
         for label, section in cases.items():
             with self.subTest(label), self.assertRaises(ConfigError):

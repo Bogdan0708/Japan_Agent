@@ -1,8 +1,10 @@
 """The human-owned `research` section of config/predict-policy.json (spec §6, §7).
 
-Everything here except the budgets is part of the cohort identity: changing the model,
-prompt-relevant limits or blocked domains opens a new cohort. Budgets are operational
-limits and may change between runs without changing what a forecast means."""
+The model, `max_turns`, blocked domains, baseline window, scoring version and
+generation are part of the cohort identity (via `settings_record()` and
+`CohortIdentity`), so changing any of them opens a new cohort. The USD budgets
+and the daily entry-forecast cap are operational limits and may change between
+runs without changing what a forecast means."""
 
 from __future__ import annotations
 
@@ -90,7 +92,7 @@ def parse_research(raw: object) -> ResearchConfig:
     if not isinstance(domains, list) or not domains:
         raise ConfigError("research.blocked_domains must be a non-empty list")
     for domain in domains:
-        if not isinstance(domain, str) or not _DOMAIN.match(domain):
+        if not isinstance(domain, str) or not _DOMAIN.fullmatch(domain):
             raise ConfigError(f"research.blocked_domains: {domain!r} is not a bare domain")
     per_forecast = _usd(raw, "per_forecast_usd")
     daily = _usd(raw, "daily_usd")
