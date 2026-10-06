@@ -201,6 +201,13 @@ class SelfCheckTests(unittest.TestCase):
         self.assertTrue(fake.cwd_existed_at_close)
         self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
 
+    def test_verified_session_without_a_result_fails_closed(self) -> None:
+        fake, outcome = run(Script(send_result=False))
+        self.assertEqual(outcome.error, "NO_RESULT")  # type: ignore[attr-defined]
+        self.assertIsNone(outcome.structured_output)  # type: ignore[attr-defined]
+        self.assertTrue(fake.closed)
+        self.assertTrue(fake.cwd_existed_at_close)
+
     def test_expected_toolset_passes(self) -> None:
         self.assertIsNone(toolset_problem({"tools": sorted(EXPECTED_SESSION_TOOLS),
                                            "mcp_servers": []}))

@@ -281,16 +281,11 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
                             else:
                                 error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
                                 detail = f"session ended with {message.subtype}"
-            # After the stream: check for missing init and hook errors (only if no error yet)
             if error is None and not session.verified:
                 error, detail = "TOOLSET_MISMATCH", "the session sent no init report"
             elif error is None and session.hook_error:
                 error, detail = "HOOK_ERROR", "a tool result could not be recorded"
-            elif error is None and session.verified:
-                # Success: verified and error was set by result processing
-                pass
-            elif error is None:
-                # No init verification and no hook error, but also no successful result
+            elif error is None and structured is None:
                 error, detail = "NO_RESULT", "the session ended without a result"
         except Exception as caught:  # noqa: BLE001 — any SDK failure fails this attempt
             error, detail = "SDK_ERROR", type(caught).__name__

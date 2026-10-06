@@ -71,6 +71,7 @@ class Script:
     raise_error: Exception | None = None
     send_init: bool = True
     early_calls: list[ToolCall] = field(default_factory=list)
+    send_result: bool = True
 
 
 class FakeClient:
@@ -96,12 +97,12 @@ class FakeClient:
     async def query(self, prompt: str) -> None:
         self.prompt = prompt
         self.fake_sdk.prompt = prompt
-        if self.fake_sdk.script.raise_error is not None:
-            raise self.fake_sdk.script.raise_error
 
     async def receive_response(self) -> AsyncIterator[Any]:
         hooks = self.options["hooks"]
         script = self.fake_sdk.script
+        if script.raise_error is not None:
+            raise script.raise_error
         # Process early_calls through hooks before init
         for call in script.early_calls:
             pre = {"tool_name": call.tool, "tool_input": call.tool_input}
@@ -132,7 +133,8 @@ class FakeClient:
                     "tool_response": call.response}
             await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
         yield AssistantMessage([TextBlock(script.text)])
-        yield script.result
+        if script.send_result:
+            yield script.result
 
 
 class FakeSdk:
