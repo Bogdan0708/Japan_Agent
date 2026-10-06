@@ -43,11 +43,12 @@ class ParseResearchTests(unittest.TestCase):
         self.assertIn("polymarket.com", config.blocked_domains)
         self.assertEqual(list(config.blocked_domains), sorted(config.blocked_domains))
 
-    def test_settings_record_freezes_identity_fields_but_not_budgets(self) -> None:
+    def test_settings_record_freezes_identity_fields_and_the_per_forecast_budget(self) -> None:
         record = parse_research(example_section()).settings_record()
         self.assertEqual(record["tools"], ["WebSearch", "WebFetch"])
         self.assertNotIn("daily_usd", record)
-        self.assertNotIn("per_forecast_usd", record)
+        self.assertNotIn("max_entry_forecasts_per_day", record)
+        self.assertEqual(record["per_forecast_usd"], "3.00")
         self.assertIn("blocked_domains", record)
 
     def test_invalid_sections_are_refused(self) -> None:

@@ -18,6 +18,7 @@ from unittest import mock
 
 from predict_agent.cash import LedgerError
 from predict_agent.cli import main
+from predict_agent.cohorts import cohort_id_for
 from predict_agent.db import connect
 from predict_agent.budget import INTERRUPTED
 from predict_agent.forecasts import fail_attempt, start_attempt
@@ -30,6 +31,7 @@ from predict_agent.research_run import (
     MAX_FAILED_ENTRY_ATTEMPTS,
     ResearchSummary,
     candidates,
+    cohort_identity,
     run_research_day,
 )
 from tests.predict.fakes import RoutedOpener
@@ -404,6 +406,17 @@ class CrashPathTests(ResearchRunTestCase):
             "SELECT reason_code, detail FROM refusals WHERE stage = 'research'").fetchone()
         self.assertEqual(refusal[0], "RECORD_FAILED")
         self.assertIn("cohort closed", refusal[1])
+
+
+class CohortIdentityTests(ResearchRunTestCase):
+    def cohort(self, research: Any) -> str:
+        return cohort_id_for(cohort_identity(self.conn, POLICY, research, NOW))
+
+    def test_per_forecast_budget_is_identity_but_daily_budget_is_not(self) -> None:
+        base = self.cohort(RESEARCH)
+        self.assertNotEqual(
+            self.cohort(replace(RESEARCH, per_forecast_usd=Decimal("2.00"))), base)
+        self.assertEqual(self.cohort(replace(RESEARCH, daily_usd=Decimal("50.00"))), base)
 
 
 class OverlapTests(ResearchRunTestCase):

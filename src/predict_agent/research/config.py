@@ -1,10 +1,11 @@
 """The human-owned `research` section of config/predict-policy.json (spec §6, §7).
 
-The model, `max_turns`, blocked domains, baseline window, scoring version and
-generation are part of the cohort identity (via `settings_record()` and
-`CohortIdentity`), so changing any of them opens a new cohort. The USD budgets
-and the daily entry-forecast cap are operational limits and may change between
-runs without changing what a forecast means."""
+The model, `max_turns`, blocked domains, the per-forecast USD budget, baseline window,
+scoring version and generation are part of the cohort identity (via `settings_record()`
+and `CohortIdentity`), so changing any of them opens a new cohort: the per-forecast
+budget caps how much research one forecast may do, so it changes what a forecast means.
+The daily USD budget and the daily entry-forecast cap are operational limits and may
+change between runs."""
 
 from __future__ import annotations
 
@@ -47,10 +48,12 @@ class ResearchConfig:
     generation: int
 
     def settings_record(self) -> dict[str, Any]:
-        """The research settings frozen into the cohort identity (no budgets)."""
+        """The research settings frozen into the cohort identity: the per-forecast budget
+        is included (Decimal text as configured); no daily budget or volume cap."""
         return {
             "tools": ["WebSearch", "WebFetch"],
             "max_turns": self.max_turns,
+            "per_forecast_usd": str(self.per_forecast_usd),
             "blocked_domains": list(self.blocked_domains),
         }
 
