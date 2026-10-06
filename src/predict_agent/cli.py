@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -198,20 +200,32 @@ def _research(
             print(f"predict-agent: {error}", file=sys.stderr)
             return 2
         runner = run_research
-    conn = connect(settings.database_path)
+    # One research run at a time: a second run would recover the first one's live attempts.
+    lock_path = settings.database_path.with_name(settings.database_path.name + ".research.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        summary = run_research_day(
-            conn,
-            http,
-            runner,
-            policy=policy,
-            research=research,
-            config_hash=config_hash,
-            code_version=code_version(settings.root),
-            now_fn=now_fn,
-        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # BlockingIOError is a subclass
+            print("predict-agent: another research run is in progress", file=sys.stderr)
+            return 2
+        conn = connect(settings.database_path)
+        try:
+            summary = run_research_day(
+                conn,
+                http,
+                runner,
+                policy=policy,
+                research=research,
+                config_hash=config_hash,
+                code_version=code_version(settings.root),
+                now_fn=now_fn,
+            )
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        os.close(lock_fd)
     print(_research_line(summary))
     return 0
 

@@ -259,7 +259,15 @@ def research_market(
     try:
         return record_forecast(conn, record, now), None
     except LedgerError as error:
-        fail_attempt(conn, attempt_id, cost, "RECORD_FAILED", now_fn())
+        try:
+            fail_attempt(conn, attempt_id, cost, "RECORD_FAILED", now_fn())
+        except ForecastError:
+            # Another run recovered (closed) the attempt meanwhile: it is already charged.
+            status = conn.execute(
+                "SELECT status FROM research_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if status is None or status["status"] == "STARTED":
+                raise
         record_refusal(conn, run_id, condition_id, "research", "RECORD_FAILED", str(error),
                        now_fn())
         return None, "RECORD_FAILED"

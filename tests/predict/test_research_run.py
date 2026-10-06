@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import os
 import io
 import json
 import shutil
@@ -404,6 +406,23 @@ class CrashPathTests(ResearchRunTestCase):
         self.assertIn("cohort closed", refusal[1])
 
 
+class OverlapTests(ResearchRunTestCase):
+    def test_record_failure_survives_an_attempt_recovered_by_another_run(self) -> None:
+        def recovered_then_failing(conn: Any, record: Any, now: Any) -> int:
+            fail_attempt(conn, record.attempt_id, Decimal("3.00"), INTERRUPTED, now)
+            raise LedgerError("cohort closed")
+
+        with mock.patch("predict_agent.research_run.record_forecast",
+                        side_effect=recovered_then_failing):
+            summary = self.run_day(FakeRunner(), book_queue=[])
+        self.assertEqual(dict(summary.failed), {"RECORD_FAILED": 1})
+        refusal = self.conn.execute(
+            "SELECT reason_code, detail FROM refusals WHERE stage = 'research'").fetchone()
+        self.assertEqual(refusal[0], "RECORD_FAILED")
+        self.assertIn("cohort closed", refusal[1])
+        self.assertEqual(self.scalar("SELECT error FROM research_attempts"), INTERRUPTED)
+
+
 class CliTests(ResearchRunTestCase):
     def cli(self, runner: FakeRunner | None, book_queue: list[dict[str, Any]]) -> tuple[int, str]:
         opener = RoutedOpener({"/book": book_queue})
@@ -419,6 +438,21 @@ class CliTests(ResearchRunTestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("forecasts 1 (abstained 0)", output)
         self.assertIn("traded 2", output)
+
+    def test_a_second_research_run_is_refused_while_the_lock_is_held(self) -> None:
+        lock_path = self.root / "data" / "predict.sqlite3.research.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runner = FakeRunner()
+            code, output = self.cli(runner, books())
+            self.assertEqual(code, 2)
+            self.assertIn("predict-agent: another research run is in progress", output)
+            self.assertEqual(runner.requests, [])
+        finally:
+            os.close(fd)
+        code, output = self.cli(FakeRunner(), books())
+        self.assertEqual(code, 0, output)
 
     def test_research_command_without_the_sdk_fails_closed(self) -> None:
         with mock.patch.dict(sys.modules, {"claude_agent_sdk": None}):
