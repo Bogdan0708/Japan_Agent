@@ -9,7 +9,8 @@ Isolation, all fail closed:
   forced onto its input; WebFetch runs only for http(s) URLs off the blocked list; the
   structured-output tool is allowed; everything else is denied. `permission_mode="dontAsk"`
   denies anything the hook does not explicitly allow.
-- A PostToolUse hook records every tool input and result into the transcript.
+- A PostToolUse hook records every tool input and result into the transcript; a
+  PostToolUseFailure hook records every failed tool call (input and error) the same way.
 - The session's own init report must list no tool outside EXPECTED_SESSION_TOOLS and no
   MCP server, or the run is aborted before any tool executes."""
 
@@ -209,6 +210,26 @@ class _Session:
             self.hook_error = True
             return {}
 
+    async def post_tool_use_failure(
+        self, input_data: Mapping[str, Any], tool_use_id: str | None, context: Any
+    ) -> dict[str, Any]:
+        try:
+            name = input_data.get("tool_name")
+            if name == STRUCTURED_OUTPUT_TOOL:
+                return {}
+            self.transcript.append(
+                {
+                    "event": "tool_error",
+                    "tool": str(name),
+                    "input": dict(input_data.get("tool_input") or {}),
+                    "error": str(input_data.get("error")),
+                }
+            )
+            return {}
+        except Exception:  # noqa: BLE001
+            self.hook_error = True
+            return {}
+
 
 def build_options(sdk: ModuleType, request: ResearchRequest, session: _Session, cwd: str) -> Any:
     hook = sdk.HookMatcher
@@ -232,6 +253,7 @@ def build_options(sdk: ModuleType, request: ResearchRequest, session: _Session, 
         hooks={
             "PreToolUse": [hook(matcher=None, hooks=[session.pre_tool_use])],
             "PostToolUse": [hook(matcher=None, hooks=[session.post_tool_use])],
+            "PostToolUseFailure": [hook(matcher=None, hooks=[session.post_tool_use_failure])],
         },
     )
 

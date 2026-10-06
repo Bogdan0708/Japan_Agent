@@ -21,6 +21,7 @@ from predict_agent.research.prompt import (
     render_user_prompt,
     research_input,
 )
+from predict_agent.research.schema import OUTPUT_SCHEMA
 from tests.predict.fixtures import NOW
 
 REPO = Path(__file__).resolve().parents[2]
@@ -114,6 +115,7 @@ class PromptTests(unittest.TestCase):
     def test_artifacts_are_canonical_and_stable(self) -> None:
         self.assertEqual(prompt_artifact(), prompt_artifact())
         self.assertEqual(json.loads(prompt_artifact())["system"], SYSTEM_PROMPT)
+        self.assertEqual(json.loads(prompt_artifact())["output_schema"], OUTPUT_SCHEMA)
         sent = json.loads(research_input(self.render()))
         self.assertEqual(sent, {"system": SYSTEM_PROMPT, "user": self.render()})
 

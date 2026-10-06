@@ -59,7 +59,9 @@ class OptionsTests(unittest.TestCase):
         self.assertEqual(
             options["output_format"], {"type": "json_schema", "schema": OUTPUT_SCHEMA}
         )
-        self.assertEqual(set(options["hooks"]), {"PreToolUse", "PostToolUse"})
+        self.assertEqual(
+            set(options["hooks"]), {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+        )
         self.assertTrue(fake.cwd_existed)
         self.assertEqual(fake.cwd_entries, [])  # an empty working directory
         self.assertEqual(fake.prompt, REQUEST.user_prompt)
@@ -123,6 +125,28 @@ class HookTests(unittest.TestCase):
             outcome.fetched_urls,  # type: ignore[attr-defined]
             frozenset(url for url, ok in urls.items() if ok),
         )
+
+    def test_failed_tool_call_is_recorded_in_the_transcript(self) -> None:
+        fake, outcome = run(Script(calls=[
+            ToolCall("WebFetch", {"url": "https://www.reuters.com/a", "prompt": "p"},
+                     error="HTTP 503"),
+        ]))
+        failures = [e for e in outcome.transcript if e["event"] == "tool_error"]  # type: ignore[attr-defined]
+        self.assertEqual(failures, [{
+            "event": "tool_error", "tool": "WebFetch",
+            "input": {"url": "https://www.reuters.com/a", "prompt": "p"},
+            "error": "HTTP 503",
+        }])
+        self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
+        # A fetch that failed was not read, so it cannot be cited.
+        self.assertEqual(outcome.fetched_urls, frozenset())  # type: ignore[attr-defined]
+
+    def test_unreadable_tool_failure_input_fails_the_attempt_closed(self) -> None:
+        session = _Session(BLOCKED)
+        import asyncio
+        asyncio.run(session.post_tool_use_failure({"tool_name": "WebFetch", "tool_input": 5},
+                                                   None, None))
+        self.assertTrue(session.hook_error)
 
     def test_any_other_tool_is_denied_and_recorded(self) -> None:
         fake, outcome = run(Script(calls=[ToolCall("Bash", {"command": "ls"}, "x")]))
@@ -285,7 +309,11 @@ class AvailabilityTests(unittest.TestCase):
         self.assertTrue(options.strict_mcp_config)
         self.assertTrue(options.verbatim_prompts)
         # Verify hooks are HookMatcher instances
-        for hook_list in (options.hooks["PreToolUse"], options.hooks["PostToolUse"]):
+        for hook_list in (
+            options.hooks["PreToolUse"],
+            options.hooks["PostToolUse"],
+            options.hooks["PostToolUseFailure"],
+        ):
             for matcher in hook_list:
                 self.assertIsInstance(matcher, sdk.HookMatcher)
 

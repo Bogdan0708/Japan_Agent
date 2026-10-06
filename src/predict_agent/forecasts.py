@@ -412,7 +412,8 @@ def undecided_portfolios(conn: sqlite3.Connection, forecast_id: int) -> list[str
 
 def resume_step(conn: sqlite3.Connection, forecast_id: int, now: datetime) -> ResumeStep:
     """BASELINE_EXPIRED means: attach books fetched inside the window if they exist,
-    otherwise mark NO_TIMELY_BASELINE. Books fetched now would be refused."""
+    otherwise mark the forecast NO_TIMELY_BASELINE (expired forecasts are marked, never
+    given a late baseline). Books fetched now would be refused."""
     forecast = _forecast_row(conn, forecast_id)
     baseline = conn.execute(
         "SELECT reason FROM forecast_baselines WHERE forecast_id = ?", (forecast_id,)

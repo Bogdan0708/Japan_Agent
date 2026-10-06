@@ -53,6 +53,7 @@ class ToolCall:
     tool: str
     tool_input: dict[str, Any]
     response: Any = None
+    error: str | None = None  # when set, the call fails: PostToolUseFailure fires
 
 
 @dataclass
@@ -98,6 +99,16 @@ class FakeClient:
         self.prompt = prompt
         self.fake_sdk.prompt = prompt
 
+    @staticmethod
+    async def _post(hooks: Any, call: ToolCall, tool_input: dict[str, Any]) -> None:
+        if call.error is not None:
+            failure = {"tool_name": call.tool, "tool_input": tool_input, "error": call.error}
+            await hooks["PostToolUseFailure"][0].hooks[0](failure, "toolu_1", {"signal": None})
+            return
+        post = {"tool_name": call.tool, "tool_input": tool_input,
+                "tool_response": call.response}
+        await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+
     async def receive_response(self) -> AsyncIterator[Any]:
         hooks = self.options["hooks"]
         script = self.fake_sdk.script
@@ -113,9 +124,7 @@ class FakeClient:
                 continue
             tool_input = output.get("updatedInput", call.tool_input)
             self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
-            post = {"tool_name": call.tool, "tool_input": tool_input,
-                    "tool_response": call.response}
-            await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+            await self._post(hooks, call, tool_input)
         if script.send_init:
             yield SystemMessage(
                 "init", {"tools": script.tools, "mcp_servers": script.mcp_servers}
@@ -129,9 +138,7 @@ class FakeClient:
                 continue
             tool_input = output.get("updatedInput", call.tool_input)
             self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
-            post = {"tool_name": call.tool, "tool_input": tool_input,
-                    "tool_response": call.response}
-            await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+            await self._post(hooks, call, tool_input)
         yield AssistantMessage([TextBlock(script.text)])
         if script.send_result:
             yield script.result

@@ -1,15 +1,16 @@
 """The forecasting prompt (spec §3 "Forecasting without the price", §5 "About the range").
 
-The prompt is frozen as one artifact (system text + user template) and its hash is part of
-the cohort identity, so any wording change opens a new cohort. A rendered prompt contains
-only the question, the pinned rules version, the end date and today's date: never a
-price, order book, volume or any market statistic."""
+The prompt is frozen as one artifact (system text, user template and output schema) and
+its hash is part of the cohort identity, so any wording or schema change opens a new
+cohort. A rendered prompt contains only the question, the pinned rules version, the end
+date and today's date: never a price, order book, volume or any market statistic."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 from ..util import canonical_json, isoformat
+from .schema import OUTPUT_SCHEMA
 
 SYSTEM_PROMPT = """You are a careful forecaster. You estimate the probability that a \
 question resolves YES under its written rules, using only evidence you find on the open \
@@ -43,7 +44,9 @@ Research the question, then return your forecast in the required structured form
 
 def prompt_artifact() -> str:
     """Canonical content of the prompt artifact frozen into the cohort identity."""
-    return canonical_json({"system": SYSTEM_PROMPT, "user_template": USER_TEMPLATE})
+    return canonical_json(
+        {"system": SYSTEM_PROMPT, "user_template": USER_TEMPLATE, "output_schema": OUTPUT_SCHEMA}
+    )
 
 
 def render_user_prompt(

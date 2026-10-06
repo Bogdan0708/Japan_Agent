@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import os
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -16,11 +16,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from predict_agent.budget import INTERRUPTED
 from predict_agent.cash import LedgerError
 from predict_agent.cli import main
 from predict_agent.cohorts import cohort_id_for
 from predict_agent.db import connect
-from predict_agent.budget import INTERRUPTED
 from predict_agent.forecasts import fail_attempt, start_attempt
 from predict_agent.http import JsonClient
 from predict_agent.invariants import verify_ledger
@@ -353,14 +353,13 @@ class ResumeTests(ResearchRunTestCase):
         self.assertEqual(tuple(failed), ("3.00", "INTERRUPTED"))
 
     def test_missing_baseline_is_taken_on_resume_within_the_window(self) -> None:
-        # Crossed pair (refused) + good pair (for retry)
-        queue = books(crossed=True) + books()
-        first = self.run_day(FakeRunner(), book_queue=queue)
-        # Baseline taken in retry, 2 trades (primary + shadow_mid portfolio)
-        self.assertEqual((first.forecasts, first.baselines, first.traded), (1, 1, 2))
+        # Two crossed pairs: the immediate baseline and the in-run retry both fail.
+        first = self.run_day(FakeRunner(), book_queue=books(crossed=True) + books(crossed=True))
+        self.assertEqual((first.forecasts, first.baselines, first.traded), (1, 0, 0))
+        # A later run inside the window takes the baseline and trades.
         second = self.run_day(FakeRunner(), book_queue=books(),
                               start=NOW + timedelta(minutes=10))
-        self.assertEqual((second.baselines, second.traded), (0, 0))
+        self.assertEqual((second.baselines, second.traded), (1, 2))
 
     def test_expired_baseline_is_marked_no_timely_baseline(self) -> None:
         # Crossed pair (refused in immediate baseline) + crossed pair (refused in retry)
