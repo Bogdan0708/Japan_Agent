@@ -20,6 +20,29 @@ class ClaudeAgentOptions:
     kwargs: dict[str, Any]
 
 
+# Every field of claude_agent_sdk.types.ClaudeAgentOptions in SDK 0.2.163 (the version the
+# `predict` extra pins), so a misspelled option fails here even without the real SDK.
+OPTION_NAMES = frozenset({
+    "add_dirs", "agents", "allowed_tools", "betas", "can_use_tool", "cli_path",
+    "continue_conversation", "cwd", "debug_stderr", "disallowed_tools", "effort",
+    "enable_file_checkpointing", "env", "extra_args", "fallback_model", "fork_session",
+    "forward_subagent_text", "hooks", "include_hook_events", "include_partial_messages",
+    "load_timeout_ms", "max_budget_usd", "max_buffer_size", "max_thinking_tokens",
+    "max_turns", "mcp_servers", "model", "output_format", "permission_mode",
+    "permission_prompt_tool_name", "plugins", "resume", "resume_drops_turn",
+    "resume_session_at", "sandbox", "session_id", "session_store", "session_store_flush",
+    "setting_sources", "settings", "skills", "stderr", "strict_mcp_config", "system_prompt",
+    "task_budget", "thinking", "tools", "user", "verbatim_prompts",
+})
+
+
+def make_options(**kwargs: Any) -> ClaudeAgentOptions:
+    unknown = sorted(set(kwargs) - OPTION_NAMES)
+    if unknown:
+        raise TypeError(f"ClaudeAgentOptions got unexpected keyword arguments {unknown}")
+    return ClaudeAgentOptions(kwargs)
+
+
 @dataclass
 class SystemMessage:
     subtype: str
@@ -161,7 +184,7 @@ class FakeSdk:
     def module(self) -> types.ModuleType:
         module = types.ModuleType("claude_agent_sdk")
         module.HookMatcher = HookMatcher  # type: ignore[attr-defined]
-        module.ClaudeAgentOptions = lambda **kwargs: ClaudeAgentOptions(kwargs)  # type: ignore[attr-defined]
+        module.ClaudeAgentOptions = make_options  # type: ignore[attr-defined]
         module.SystemMessage = SystemMessage  # type: ignore[attr-defined]
         module.AssistantMessage = AssistantMessage  # type: ignore[attr-defined]
         module.TextBlock = TextBlock  # type: ignore[attr-defined]

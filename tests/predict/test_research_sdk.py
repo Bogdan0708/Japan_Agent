@@ -318,5 +318,15 @@ class AvailabilityTests(unittest.TestCase):
                 self.assertIsInstance(matcher, sdk.HookMatcher)
 
 
+class FakeFidelityTests(unittest.TestCase):
+    def test_fake_options_accept_only_sdk_option_names(self) -> None:
+        # The fake pins the ClaudeAgentOptions field names of SDK 0.2.163, so a misspelled
+        # option fails even where the real SDK is not installed (CI).
+        module = FakeSdk(Script()).module()
+        module.ClaudeAgentOptions(tools=[], cwd="/tmp")
+        with self.assertRaisesRegex(TypeError, "allowed_tool"):
+            module.ClaudeAgentOptions(allowed_tool=[])
+
+
 if __name__ == "__main__":
     unittest.main()
