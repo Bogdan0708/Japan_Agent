@@ -36,5 +36,38 @@
     "max_slippage": "0.02",
     "min_hours_to_close": 48,
     "max_book_age_seconds": 120
+  },
+  "research": {
+    "model": "claude-opus-5-5",
+    "max_turns": 40,
+    "per_forecast_usd": "3.00",
+    "daily_usd": "30.00",
+    "max_entry_forecasts_per_day": 15,
+    "blocked_domains": [
+      "bet365.com",
+      "betfair.co.uk",
+      "betfair.com",
+      "draftkings.com",
+      "electionbettingodds.com",
+      "fanduel.com",
+      "gjopen.com",
+      "goodjudgment.com",
+      "kalshi.com",
+      "kalshidata.com",
+      "ladbrokes.com",
+      "manifold.markets",
+      "metaculus.com",
+      "oddschecker.com",
+      "oddsshark.com",
+      "paddypower.com",
+      "polymarket.com",
+      "polymarketanalytics.com",
+      "predictit.org",
+      "smarkets.com",
+      "williamhill.com"
+    ],
+    "baseline_window_seconds": 1800,
+    "scoring_version": "1",
+    "generation": 1
   }
 }

@@ -24,6 +24,7 @@ from .invariants import verify_ledger
 from .paper import trade_ready
 from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
+from .research.config import load_research_config
 from .settlement import settle_open_tickets
 from .util import utc_now
 
@@ -91,9 +92,11 @@ def main(
     if args.command == "doctor":
         try:
             load_policy_config(settings.policy_path)
+            research = load_research_config(settings.policy_path)
         except ConfigError as error:
             print(f"predict-agent: {error}", file=sys.stderr)
             return 2
+        print(f"research: model {research.model}")
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)
