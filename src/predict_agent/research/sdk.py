@@ -16,7 +16,6 @@ Isolation, all fail closed:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib
 import re
 import tempfile
@@ -251,15 +250,14 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
     text: list[str] = []
     structured: Any = None
     cost: Decimal | None = None
-    error: str | None = "NO_RESULT"
-    detail = "the session ended without a result"
+    error: str | None = None
+    detail = ""
     with tempfile.TemporaryDirectory(prefix="predict-research-") as cwd:
         options = build_options(sdk, request, session, cwd)
         try:
-            async with contextlib.aclosing(
-                sdk.query(prompt=request.user_prompt, options=options)
-            ) as messages:
-                async for message in messages:
+            async with sdk.ClaudeSDKClient(options=options) as client:
+                await client.query(request.user_prompt)
+                async for message in client.receive_response():
                     if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
                         problem = toolset_problem(message.data)
                         if problem is not None:
@@ -283,11 +281,17 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
                             else:
                                 error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
                                 detail = f"session ended with {message.subtype}"
-            # After the stream: check for missing init and hook errors
-            if not session.verified:
+            # After the stream: check for missing init and hook errors (only if no error yet)
+            if error is None and not session.verified:
                 error, detail = "TOOLSET_MISMATCH", "the session sent no init report"
-            elif session.hook_error:
+            elif error is None and session.hook_error:
                 error, detail = "HOOK_ERROR", "a tool result could not be recorded"
+            elif error is None and session.verified:
+                # Success: verified and error was set by result processing
+                pass
+            elif error is None:
+                # No init verification and no hook error, but also no successful result
+                error, detail = "NO_RESULT", "the session ended without a result"
         except Exception as caught:  # noqa: BLE001 — any SDK failure fails this attempt
             error, detail = "SDK_ERROR", type(caught).__name__
     return ResearchOutcome(

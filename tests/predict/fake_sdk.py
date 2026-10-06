@@ -1,5 +1,4 @@
-"""A stand-in for the `claude_agent_sdk` module: the same names research.sdk uses, and a
-`query` that replays a scripted session through the real hooks. No network, no CLI."""
+"""A stand-in for the `claude_agent_sdk` module: models ClaudeSDKClient and related types."""
 
 from __future__ import annotations
 
@@ -74,6 +73,68 @@ class Script:
     early_calls: list[ToolCall] = field(default_factory=list)
 
 
+class FakeClient:
+    """Models ClaudeSDKClient for testing."""
+
+    def __init__(self, fake_sdk: FakeSdk, options: ClaudeAgentOptions) -> None:
+        self.fake_sdk = fake_sdk
+        self.options = options.kwargs
+        self.prompt: str | None = None
+        self.cwd = self.options["cwd"]
+
+    async def __aenter__(self) -> FakeClient:
+        self.fake_sdk.options = self.options
+        self.fake_sdk.cwd_existed = os.path.isdir(self.cwd)
+        self.fake_sdk.cwd_entries = os.listdir(self.cwd)
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        self.fake_sdk.closed = True
+        self.fake_sdk.cwd_existed_at_close = os.path.isdir(self.cwd)
+        return False
+
+    async def query(self, prompt: str) -> None:
+        self.prompt = prompt
+        self.fake_sdk.prompt = prompt
+        if self.fake_sdk.script.raise_error is not None:
+            raise self.fake_sdk.script.raise_error
+
+    async def receive_response(self) -> AsyncIterator[Any]:
+        hooks = self.options["hooks"]
+        script = self.fake_sdk.script
+        # Process early_calls through hooks before init
+        for call in script.early_calls:
+            pre = {"tool_name": call.tool, "tool_input": call.tool_input}
+            decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
+            self.fake_sdk.decisions.append(decision)
+            output = decision["hookSpecificOutput"]
+            if output["permissionDecision"] != "allow":
+                continue
+            tool_input = output.get("updatedInput", call.tool_input)
+            self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
+            post = {"tool_name": call.tool, "tool_input": tool_input,
+                    "tool_response": call.response}
+            await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+        if script.send_init:
+            yield SystemMessage(
+                "init", {"tools": script.tools, "mcp_servers": script.mcp_servers}
+            )
+        for call in script.calls:
+            pre = {"tool_name": call.tool, "tool_input": call.tool_input}
+            decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
+            self.fake_sdk.decisions.append(decision)
+            output = decision["hookSpecificOutput"]
+            if output["permissionDecision"] != "allow":
+                continue
+            tool_input = output.get("updatedInput", call.tool_input)
+            self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
+            post = {"tool_name": call.tool, "tool_input": tool_input,
+                    "tool_response": call.response}
+            await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+        yield AssistantMessage([TextBlock(script.text)])
+        yield script.result
+
+
 class FakeSdk:
     """Builds the fake module and records what the adapter did with it."""
 
@@ -86,6 +147,7 @@ class FakeSdk:
         self.cwd_existed = False
         self.cwd_entries: list[str] = []
         self.closed = False
+        self.cwd_existed_at_close = False
 
     def module(self) -> types.ModuleType:
         module = types.ModuleType("claude_agent_sdk")
@@ -95,49 +157,8 @@ class FakeSdk:
         module.AssistantMessage = AssistantMessage  # type: ignore[attr-defined]
         module.TextBlock = TextBlock  # type: ignore[attr-defined]
         module.ResultMessage = ResultMessage  # type: ignore[attr-defined]
-        module.query = self.query  # type: ignore[attr-defined]
+        module.ClaudeSDKClient = self.client  # type: ignore[attr-defined]
         return module
 
-    async def query(self, *, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[Any]:
-        try:
-            self.prompt = prompt
-            self.options = options.kwargs
-            cwd = self.options["cwd"]
-            self.cwd_existed = os.path.isdir(cwd)
-            self.cwd_entries = os.listdir(cwd)
-            if self.script.raise_error is not None:
-                raise self.script.raise_error
-            hooks = self.options["hooks"]
-            # Process early_calls through hooks before init
-            for call in self.script.early_calls:
-                pre = {"tool_name": call.tool, "tool_input": call.tool_input}
-                decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
-                self.decisions.append(decision)
-                output = decision["hookSpecificOutput"]
-                if output["permissionDecision"] != "allow":
-                    continue
-                tool_input = output.get("updatedInput", call.tool_input)
-                self.executed.append(ToolCall(call.tool, tool_input, call.response))
-                post = {"tool_name": call.tool, "tool_input": tool_input,
-                        "tool_response": call.response}
-                await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
-            if self.script.send_init:
-                yield SystemMessage(
-                    "init", {"tools": self.script.tools, "mcp_servers": self.script.mcp_servers}
-                )
-            for call in self.script.calls:
-                pre = {"tool_name": call.tool, "tool_input": call.tool_input}
-                decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
-                self.decisions.append(decision)
-                output = decision["hookSpecificOutput"]
-                if output["permissionDecision"] != "allow":
-                    continue
-                tool_input = output.get("updatedInput", call.tool_input)
-                self.executed.append(ToolCall(call.tool, tool_input, call.response))
-                post = {"tool_name": call.tool, "tool_input": tool_input,
-                        "tool_response": call.response}
-                await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
-            yield AssistantMessage([TextBlock(self.script.text)])
-            yield self.script.result
-        finally:
-            self.closed = True
+    def client(self, *, options: ClaudeAgentOptions) -> FakeClient:
+        return FakeClient(self, options)

@@ -189,6 +189,17 @@ class SelfCheckTests(unittest.TestCase):
                 self.assertEqual(fake.decisions, [])
                 self.assertIsNone(outcome.structured_output)  # type: ignore[attr-defined]
                 self.assertTrue(fake.closed)
+                self.assertTrue(fake.cwd_existed_at_close)
+                # Detail should be the real problem, not "session sent no init report"
+                self.assertTrue(
+                    "unexpected tools" in outcome.detail or "MCP" in outcome.detail  # type: ignore[attr-defined]
+                )
+
+    def test_session_is_closed_after_a_normal_run(self) -> None:
+        fake, outcome = run(Script())
+        self.assertTrue(fake.closed)
+        self.assertTrue(fake.cwd_existed_at_close)
+        self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
 
     def test_expected_toolset_passes(self) -> None:
         self.assertIsNone(toolset_problem({"tools": sorted(EXPECTED_SESSION_TOOLS),
@@ -243,6 +254,7 @@ class AvailabilityTests(unittest.TestCase):
     @unittest.skipUnless(find_spec("claude_agent_sdk"), "Claude Agent SDK not installed")
     def test_real_sdk_accepts_every_option_name(self) -> None:
         sdk = load_sdk()
+        self.assertTrue(hasattr(sdk, "ClaudeSDKClient"))
         options = build_options(sdk, REQUEST, _Session(BLOCKED), "/tmp")
         self.assertEqual(options.tools, ["WebSearch", "WebFetch"])
         self.assertEqual(options.permission_mode, "dontAsk")
