@@ -100,6 +100,19 @@ class HookTests(unittest.TestCase):
             "https://[::1]/": False,
             "https://www.reuters.com/a%20b?x=1#f": True,
             "https://medium.com/@writer/post": True,
+            "https://web.archive.org/web/2026/https://polymarket.com/event/x": False,
+            "https://polymarket-com.translate.goog/event/x": False,
+            "https://r.jina.ai/https://polymarket.com/x": False,
+            "https://example.com/?u=POLYMARKET.COM": False,
+            "http://router.local/": False,
+            "http://metadata.google.internal/x": False,
+            "http://192-168-1-1.nip.io/": False,
+            "http://localhost/": False,
+            "http://nas.lan/": False,
+            "http://printer.home.arpa/": False,
+            "http://a.sslip.io/": False,
+            "http://x.localtest.me/": False,
+            "https://www.internal-medicine.org/": True,
         }
         fake, outcome = run(Script(calls=[
             ToolCall("WebFetch", {"url": url, "prompt": "p"}, "page") for url in urls

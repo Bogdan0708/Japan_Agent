@@ -44,6 +44,8 @@
     "daily_usd": "30.00",
     "max_entry_forecasts_per_day": 15,
     "blocked_domains": [
+      "archive.ph",
+      "archive.today",
       "bet365.com",
       "betfair.co.uk",
       "betfair.com",
@@ -63,7 +65,10 @@
       "polymarket.com",
       "polymarketanalytics.com",
       "predictit.org",
+      "r.jina.ai",
       "smarkets.com",
+      "translate.goog",
+      "web.archive.org",
       "williamhill.com"
     ],
     "baseline_window_seconds": 1800,

@@ -86,6 +86,15 @@ _HOSTNAME = re.compile(
 )
 
 
+# Local-network names and wildcard-DNS services that resolve to private addresses. The hook
+# does no DNS resolution; names only.
+_LOCAL_NAMES = frozenset({"nip.io", "sslip.io", "localtest.me", "localhost"})
+_LOCAL_SUFFIXES = (
+    ".local", ".internal", ".lan", ".home.arpa", ".localhost", ".localdomain",
+    ".nip.io", ".sslip.io", ".localtest.me",
+)
+
+
 def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
     """None when WebFetch may open `url`, else the reason it may not. The CLI parses URLs
     with WHATWG rules, so anything Python's parser could read differently is refused:
@@ -105,6 +114,12 @@ def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
         return f"host must be a plain DNS name: {url!r}"
     if blocked_host(host, blocked):
         return f"{host} is on the blocked-domain list"
+    if host in _LOCAL_NAMES or host.endswith(_LOCAL_SUFFIXES):
+        return f"{host} is a local-network name"
+    lowered = url.lower()
+    for domain in blocked:
+        if domain in lowered or domain.replace(".", "-") in lowered:
+            return f"url refers to blocked domain {domain}"
     return None
 
 
