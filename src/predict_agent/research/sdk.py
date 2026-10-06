@@ -16,7 +16,9 @@ Isolation, all fail closed:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -31,6 +33,12 @@ ALLOWED_TOOLS = ("WebSearch", "WebFetch")
 STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
 # What the session may report as available. Pinned by the Plan 4 live smoke run.
 EXPECTED_SESSION_TOOLS = frozenset({*ALLOWED_TOOLS, STRUCTURED_OUTPUT_TOOL})
+# Belt and braces with `tools=` and the hook (spec §6): never offer these.
+DENIED_TOOLS = (
+    "Agent", "Bash", "BashOutput", "Edit", "ExitPlanMode", "Glob", "Grep", "KillShell",
+    "MultiEdit", "NotebookEdit", "NotebookRead", "Read", "Skill", "SlashCommand", "Task",
+    "TodoWrite", "Write",
+)
 _RESULT_ERRORS = {
     "error_max_budget_usd": "MAX_BUDGET",
     "error_max_turns": "MAX_TURNS",
@@ -73,15 +81,31 @@ def load_sdk() -> ModuleType:
         ) from None
 
 
+# A plain ASCII DNS name whose last label starts with a letter (so no IP literals).
+_HOSTNAME = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
+
+
 def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
-    """None when WebFetch may open `url`, else the reason it may not."""
+    """None when WebFetch may open `url`, else the reason it may not. The CLI parses URLs
+    with WHATWG rules, so anything Python's parser could read differently is refused:
+    non-ASCII, backslashes, whitespace or control characters anywhere, and userinfo or
+    percent-escapes in the authority; the host must be a plain DNS name (no IP literal)."""
     if not isinstance(url, str):
         return "url is not a string"
+    if not url.isascii() or "\\" in url or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return f"url has characters URL parsers disagree on: {url!r}"
     parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    if parts.scheme not in ("http", "https"):
         return f"only http(s) URLs may be fetched: {url!r}"
-    if blocked_host(parts.hostname, blocked):
-        return f"{parts.hostname} is on the blocked-domain list"
+    if "@" in parts.netloc or "%" in parts.netloc:
+        return f"userinfo and escapes are not allowed in the host: {url!r}"
+    host = parts.hostname or ""
+    if not _HOSTNAME.fullmatch(host):
+        return f"host must be a plain DNS name: {url!r}"
+    if blocked_host(host, blocked):
+        return f"{host} is on the blocked-domain list"
     return None
 
 
@@ -92,6 +116,8 @@ class _Session:
         self.blocked = blocked
         self.transcript: list[dict[str, Any]] = []
         self.fetched: set[str] = set()
+        self.verified = False
+        self.hook_error = False
 
     @staticmethod
     def _decision(decision: str, reason: str = "", **extra: Any) -> dict[str, Any]:
@@ -107,48 +133,67 @@ class _Session:
     async def pre_tool_use(
         self, input_data: Mapping[str, Any], tool_use_id: str | None, context: Any
     ) -> dict[str, Any]:
-        name = input_data.get("tool_name")
-        tool_input = dict(input_data.get("tool_input") or {})
-        if name == "WebSearch":
-            tool_input.pop("allowed_domains", None)
-            tool_input["blocked_domains"] = list(self.blocked)
-            self.transcript.append({"event": "call", "tool": name, "input": tool_input})
-            return self._decision("allow", updatedInput=tool_input)
-        if name == "WebFetch":
-            reason = _fetchable(tool_input.get("url"), self.blocked)
-            if reason is None:
+        try:
+            name = input_data.get("tool_name")
+            tool_input = dict(input_data.get("tool_input") or {})
+            # Fail closed until init is verified
+            if not self.verified:
+                reason = "session toolset not verified yet"
+                self.transcript.append(
+                    {"event": "denied", "tool": str(name), "input": tool_input, "reason": reason}
+                )
+                return self._decision("deny", reason)
+            if name == "WebSearch":
+                tool_input.pop("allowed_domains", None)
+                tool_input["blocked_domains"] = list(self.blocked)
                 self.transcript.append({"event": "call", "tool": name, "input": tool_input})
+                return self._decision("allow", updatedInput=tool_input)
+            if name == "WebFetch":
+                fetch_reason = _fetchable(tool_input.get("url"), self.blocked)
+                if fetch_reason is None:
+                    self.transcript.append({"event": "call", "tool": name, "input": tool_input})
+                    return self._decision("allow")
+                self.transcript.append(
+                    {"event": "denied", "tool": name, "input": tool_input, "reason": fetch_reason}
+                )
+                return self._decision("deny", fetch_reason)
+            if name == STRUCTURED_OUTPUT_TOOL:
                 return self._decision("allow")
+            reason = f"tool {name!r} is not available for research"
             self.transcript.append(
-                {"event": "denied", "tool": name, "input": tool_input, "reason": reason}
+                {"event": "denied", "tool": str(name), "input": tool_input, "reason": reason}
             )
             return self._decision("deny", reason)
-        if name == STRUCTURED_OUTPUT_TOOL:
-            return self._decision("allow")
-        reason = f"tool {name!r} is not available for research"
-        self.transcript.append(
-            {"event": "denied", "tool": str(name), "input": tool_input, "reason": reason}
-        )
-        return self._decision("deny", reason)
+        except Exception:  # noqa: BLE001
+            reason = "hook could not read the tool call"
+            self.transcript.append(
+                {"event": "denied", "tool": str(input_data.get("tool_name", "unknown")),
+                 "input": input_data.get("tool_input") or {}, "reason": reason}
+            )
+            return self._decision("deny", reason)
 
     async def post_tool_use(
         self, input_data: Mapping[str, Any], tool_use_id: str | None, context: Any
     ) -> dict[str, Any]:
-        name = input_data.get("tool_name")
-        if name == STRUCTURED_OUTPUT_TOOL:
+        try:
+            name = input_data.get("tool_name")
+            if name == STRUCTURED_OUTPUT_TOOL:
+                return {}
+            tool_input = dict(input_data.get("tool_input") or {})
+            self.transcript.append(
+                {
+                    "event": "result",
+                    "tool": str(name),
+                    "input": tool_input,
+                    "output": input_data.get("tool_response"),
+                }
+            )
+            if name == "WebFetch" and isinstance(tool_input.get("url"), str):
+                self.fetched.add(tool_input["url"])
             return {}
-        tool_input = dict(input_data.get("tool_input") or {})
-        self.transcript.append(
-            {
-                "event": "result",
-                "tool": str(name),
-                "input": tool_input,
-                "output": input_data.get("tool_response"),
-            }
-        )
-        if name == "WebFetch" and isinstance(tool_input.get("url"), str):
-            self.fetched.add(tool_input["url"])
-        return {}
+        except Exception:  # noqa: BLE001
+            self.hook_error = True
+            return {}
 
 
 def build_options(sdk: ModuleType, request: ResearchRequest, session: _Session, cwd: str) -> Any:
@@ -156,6 +201,7 @@ def build_options(sdk: ModuleType, request: ResearchRequest, session: _Session, 
     return sdk.ClaudeAgentOptions(
         tools=list(ALLOWED_TOOLS),
         allowed_tools=[],
+        disallowed_tools=list(DENIED_TOOLS),
         system_prompt=request.system_prompt,
         mcp_servers={},
         strict_mcp_config=True,
@@ -210,27 +256,38 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
     with tempfile.TemporaryDirectory(prefix="predict-research-") as cwd:
         options = build_options(sdk, request, session, cwd)
         try:
-            async for message in sdk.query(prompt=request.user_prompt, options=options):
-                if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
-                    problem = toolset_problem(message.data)
-                    if problem is not None:
-                        error, detail = "TOOLSET_MISMATCH", problem
-                        break
-                elif isinstance(message, sdk.AssistantMessage):
-                    text.extend(
-                        block.text for block in message.content
-                        if isinstance(block, sdk.TextBlock)
-                    )
-                elif isinstance(message, sdk.ResultMessage):
-                    cost = _cost(message.total_cost_usd)
-                    if message.subtype == "success" and not message.is_error:
-                        structured = message.structured_output
-                        error, detail = (None, "") if structured is not None else (
-                            "NO_RESULT", "the session returned no structured output"
+            async with contextlib.aclosing(
+                sdk.query(prompt=request.user_prompt, options=options)
+            ) as messages:
+                async for message in messages:
+                    if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
+                        problem = toolset_problem(message.data)
+                        if problem is not None:
+                            error, detail = "TOOLSET_MISMATCH", problem
+                            break
+                        session.verified = True
+                    elif isinstance(message, sdk.AssistantMessage):
+                        text.extend(
+                            block.text for block in message.content
+                            if isinstance(block, sdk.TextBlock)
                         )
-                    else:
-                        error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
-                        detail = f"session ended with {message.subtype}"
+                    elif isinstance(message, sdk.ResultMessage):
+                        cost = _cost(message.total_cost_usd)
+                        # Only process result if we have verified the toolset
+                        if session.verified:
+                            if message.subtype == "success" and not message.is_error:
+                                structured = message.structured_output
+                                error, detail = (None, "") if structured is not None else (
+                                    "NO_RESULT", "the session returned no structured output"
+                                )
+                            else:
+                                error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
+                                detail = f"session ended with {message.subtype}"
+            # After the stream: check for missing init and hook errors
+            if not session.verified:
+                error, detail = "TOOLSET_MISMATCH", "the session sent no init report"
+            elif session.hook_error:
+                error, detail = "HOOK_ERROR", "a tool result could not be recorded"
         except Exception as caught:  # noqa: BLE001 — any SDK failure fails this attempt
             error, detail = "SDK_ERROR", type(caught).__name__
     return ResearchOutcome(

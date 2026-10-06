@@ -8,7 +8,10 @@ from unittest import mock
 
 from predict_agent.research.schema import OUTPUT_SCHEMA
 from predict_agent.research.sdk import (
+    ALLOWED_TOOLS,
+    DENIED_TOOLS,
     EXPECTED_SESSION_TOOLS,
+    STRUCTURED_OUTPUT_TOOL,
     ResearchRequest,
     ResearchUnavailable,
     _Session,
@@ -60,6 +63,12 @@ class OptionsTests(unittest.TestCase):
         self.assertTrue(fake.cwd_existed)
         self.assertEqual(fake.cwd_entries, [])  # an empty working directory
         self.assertEqual(fake.prompt, REQUEST.user_prompt)
+        self.assertEqual(options["disallowed_tools"], list(DENIED_TOOLS))
+        # No overlap between allowed and denied
+        self.assertTrue(
+            set(ALLOWED_TOOLS).isdisjoint(set(DENIED_TOOLS)) and
+            STRUCTURED_OUTPUT_TOOL not in DENIED_TOOLS
+        )
         self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
 
 
@@ -82,6 +91,15 @@ class HookTests(unittest.TestCase):
             "ftp://example.org/data.csv": False,
             "https://www.reuters.com/world/a": True,
             "http://example.org/b": True,
+            "https://polymarket.com\\@good.com/": False,
+            "https://polymarket%2Ecom/": False,
+            "https://ｐｏｌｙｍａｒｋｅｔ.com/": False,
+            "https://polymarket。com/": False,
+            "https://good.com@polymarket.com/": False,
+            "https://1.2.3.4/": False,
+            "https://[::1]/": False,
+            "https://www.reuters.com/a%20b?x=1#f": True,
+            "https://medium.com/@writer/post": True,
         }
         fake, outcome = run(Script(calls=[
             ToolCall("WebFetch", {"url": url, "prompt": "p"}, "page") for url in urls
@@ -114,6 +132,7 @@ class HookTests(unittest.TestCase):
         import asyncio
 
         session = _Session(BLOCKED)
+        session.verified = True
         decision = asyncio.run(session.pre_tool_use(
             {"tool_name": "WebFetch", "tool_input": {"url": "https://polymarket.com"}},
             None, {"signal": None},
@@ -122,6 +141,38 @@ class HookTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "PreToolUse")
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("blocked", output["permissionDecisionReason"])
+
+    def test_no_init_report_fails_closed(self) -> None:
+        fake, outcome = run(Script(send_init=False))
+        self.assertEqual(outcome.error, "TOOLSET_MISMATCH")  # type: ignore[attr-defined]
+        self.assertIsNone(outcome.structured_output)  # type: ignore[attr-defined]
+
+    def test_tool_call_before_init_is_denied(self) -> None:
+        fake, outcome = run(Script(early_calls=[
+            ToolCall("WebSearch", {"query": "q"}, {})
+        ]))
+        self.assertEqual(fake.decisions[0]["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(fake.executed, [])
+        self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
+
+    def test_malformed_hook_inputs_fail_closed(self) -> None:
+        import asyncio
+
+        session = _Session(BLOCKED)
+        session.verified = True
+        # pre_tool_use with malformed tool_input (not a dict)
+        decision = asyncio.run(session.pre_tool_use(
+            {"tool_name": "WebFetch", "tool_input": "not a dict"},
+            None, {"signal": None},
+        ))
+        self.assertEqual(decision["hookSpecificOutput"]["permissionDecision"], "deny")
+        # post_tool_use with malformed tool_input
+        result = asyncio.run(session.post_tool_use(
+            {"tool_name": "WebFetch", "tool_input": "not a dict", "tool_response": "x"},
+            None, {"signal": None},
+        ))
+        self.assertEqual(result, {})
+        self.assertIs(session.hook_error, True)
 
 
 class SelfCheckTests(unittest.TestCase):
@@ -137,6 +188,7 @@ class SelfCheckTests(unittest.TestCase):
                 self.assertEqual(outcome.error, "TOOLSET_MISMATCH")  # type: ignore[attr-defined]
                 self.assertEqual(fake.decisions, [])
                 self.assertIsNone(outcome.structured_output)  # type: ignore[attr-defined]
+                self.assertTrue(fake.closed)
 
     def test_expected_toolset_passes(self) -> None:
         self.assertIsNone(toolset_problem({"tools": sorted(EXPECTED_SESSION_TOOLS),
@@ -195,8 +247,15 @@ class AvailabilityTests(unittest.TestCase):
         self.assertEqual(options.tools, ["WebSearch", "WebFetch"])
         self.assertEqual(options.permission_mode, "dontAsk")
         self.assertEqual(options.setting_sources, [])
+        self.assertEqual(options.skills, [])
+        self.assertEqual(options.allowed_tools, [])
+        self.assertEqual(options.disallowed_tools, list(DENIED_TOOLS))
         self.assertTrue(options.strict_mcp_config)
         self.assertTrue(options.verbatim_prompts)
+        # Verify hooks are HookMatcher instances
+        for hook_list in (options.hooks["PreToolUse"], options.hooks["PostToolUse"]):
+            for matcher in hook_list:
+                self.assertIsInstance(matcher, sdk.HookMatcher)
 
 
 if __name__ == "__main__":

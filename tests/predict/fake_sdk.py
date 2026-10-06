@@ -70,6 +70,8 @@ class Script:
         )
     )
     raise_error: Exception | None = None
+    send_init: bool = True
+    early_calls: list[ToolCall] = field(default_factory=list)
 
 
 class FakeSdk:
@@ -83,6 +85,7 @@ class FakeSdk:
         self.executed: list[ToolCall] = []  # calls that passed PreToolUse
         self.cwd_existed = False
         self.cwd_entries: list[str] = []
+        self.closed = False
 
     def module(self) -> types.ModuleType:
         module = types.ModuleType("claude_agent_sdk")
@@ -96,28 +99,45 @@ class FakeSdk:
         return module
 
     async def query(self, *, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[Any]:
-        self.prompt = prompt
-        self.options = options.kwargs
-        cwd = self.options["cwd"]
-        self.cwd_existed = os.path.isdir(cwd)
-        self.cwd_entries = os.listdir(cwd)
-        if self.script.raise_error is not None:
-            raise self.script.raise_error
-        yield SystemMessage(
-            "init", {"tools": self.script.tools, "mcp_servers": self.script.mcp_servers}
-        )
-        hooks = self.options["hooks"]
-        for call in self.script.calls:
-            pre = {"tool_name": call.tool, "tool_input": call.tool_input}
-            decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
-            self.decisions.append(decision)
-            output = decision["hookSpecificOutput"]
-            if output["permissionDecision"] != "allow":
-                continue
-            tool_input = output.get("updatedInput", call.tool_input)
-            self.executed.append(ToolCall(call.tool, tool_input, call.response))
-            post = {"tool_name": call.tool, "tool_input": tool_input,
-                    "tool_response": call.response}
-            await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
-        yield AssistantMessage([TextBlock(self.script.text)])
-        yield self.script.result
+        try:
+            self.prompt = prompt
+            self.options = options.kwargs
+            cwd = self.options["cwd"]
+            self.cwd_existed = os.path.isdir(cwd)
+            self.cwd_entries = os.listdir(cwd)
+            if self.script.raise_error is not None:
+                raise self.script.raise_error
+            hooks = self.options["hooks"]
+            # Process early_calls through hooks before init
+            for call in self.script.early_calls:
+                pre = {"tool_name": call.tool, "tool_input": call.tool_input}
+                decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
+                self.decisions.append(decision)
+                output = decision["hookSpecificOutput"]
+                if output["permissionDecision"] != "allow":
+                    continue
+                tool_input = output.get("updatedInput", call.tool_input)
+                self.executed.append(ToolCall(call.tool, tool_input, call.response))
+                post = {"tool_name": call.tool, "tool_input": tool_input,
+                        "tool_response": call.response}
+                await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+            if self.script.send_init:
+                yield SystemMessage(
+                    "init", {"tools": self.script.tools, "mcp_servers": self.script.mcp_servers}
+                )
+            for call in self.script.calls:
+                pre = {"tool_name": call.tool, "tool_input": call.tool_input}
+                decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})
+                self.decisions.append(decision)
+                output = decision["hookSpecificOutput"]
+                if output["permissionDecision"] != "allow":
+                    continue
+                tool_input = output.get("updatedInput", call.tool_input)
+                self.executed.append(ToolCall(call.tool, tool_input, call.response))
+                post = {"tool_name": call.tool, "tool_input": tool_input,
+                        "tool_response": call.response}
+                await hooks["PostToolUse"][0].hooks[0](post, "toolu_1", {"signal": None})
+            yield AssistantMessage([TextBlock(self.script.text)])
+            yield self.script.result
+        finally:
+            self.closed = True
