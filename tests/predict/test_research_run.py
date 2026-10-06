@@ -194,6 +194,16 @@ class HappyPathTests(ResearchRunTestCase):
         self.assertIn("phrase:cents_per_share", flags)
         self.assertIn("phrase:odds_of", flags)
 
+    def test_exposure_in_a_failed_tool_call_is_flagged_on_the_forecast(self) -> None:
+        # The model reads a tool's error text too (spec §6: everything the model saw).
+        failure = {"event": "tool_error", "tool": "WebFetch", "input": {"url": "https://x.org/a"},
+                   "error": "Upstream said: Kalshi prices it at 40 cents a share"}
+        runner = FakeRunner(outcome(transcript=outcome().transcript + (failure,)))
+        self.run_day(runner)
+        flags = json.loads(self.scalar("SELECT body_json FROM forecasts"))["exposure_flags"]
+        self.assertIn("venue:kalshi", flags)
+        self.assertIn("phrase:cents_per_share", flags)
+
     def test_abstention_is_recorded_baselined_and_refused(self) -> None:
         runner = FakeRunner(outcome(structured_output=forecast_output(
             abstain=True, abstain_reason="rules ambiguous", p_low=None, p_mid=None,
@@ -252,6 +262,20 @@ class SystemicFailureTests(ResearchRunTestCase):
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 1)
         self.assertEqual(dict(summary.skipped), {"ABORTED_TOOLSET_MISMATCH": 2})
         self.assertEqual(dict(summary.failed), {"TOOLSET_MISMATCH": 1})
+
+    def test_aborted_markets_are_recorded_as_refusals(self) -> None:
+        # Like BUDGET and VOLUME skips, an abort leaves a durable refusal per market.
+        self.add_markets(*OTHER[:2])
+        bad = outcome(error="TOOLSET_MISMATCH", cost_usd=None, structured_output=None)
+        self.run_day(FakeRunner(bad), book_queue=[])
+        rows = self.conn.execute(
+            "SELECT condition_id, reason_code FROM refusals WHERE stage = 'research' "
+            "AND reason_code LIKE 'ABORTED_%' ORDER BY condition_id"
+        ).fetchall()
+        self.assertEqual(
+            [tuple(r) for r in rows],
+            [(c, "ABORTED_TOOLSET_MISMATCH") for c in sorted(self.markets)[1:]],
+        )
 
     def test_hook_error_stops_the_run(self) -> None:
         self.add_markets(*OTHER[:2])

@@ -177,9 +177,12 @@ def _string_leaves(value: object) -> list[str]:
 
 
 def _exposure_texts(outcome: ResearchOutcome) -> list[str]:
+    """Everything the model saw: its own text, the output, every tool result and every
+    tool error (the model reads a failed call's error text too). Denial reasons and tool
+    inputs are the model's or the hook's own words, not something it saw."""
     texts = [outcome.final_text, *_string_leaves(outcome.structured_output)]
     for event in outcome.transcript:
-        texts += _string_leaves(event.get("output"))
+        texts += _string_leaves(event.get("output")) + _string_leaves(event.get("error"))
     return texts
 
 
@@ -359,8 +362,13 @@ def run_research_day(
                 summary.failed[code] += 1
                 sdk_errors = sdk_errors + 1 if code == "SDK_ERROR" else 0
                 if code in SYSTEMIC_FAILURES or sdk_errors >= SDK_ERROR_STREAK:
-                    if len(pending) - index - 1:
-                        summary.skipped["ABORTED_" + code] += len(pending) - index - 1
+                    # Like BUDGET and VOLUME, every market left unresearched gets a
+                    # durable refusal, not just a line in the summary.
+                    for left in pending[index + 1:]:
+                        record_refusal(conn, run_id, left["condition_id"], "research",
+                                       "ABORTED_" + code, f"run aborted after {code}",
+                                       now_fn())
+                        summary.skipped["ABORTED_" + code] += 1
                     break
                 continue
             sdk_errors = 0
