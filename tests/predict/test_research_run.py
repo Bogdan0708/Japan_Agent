@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from predict_agent.cash import LedgerError
 from predict_agent.cli import main
 from predict_agent.db import connect
 from predict_agent.forecasts import start_attempt
@@ -252,18 +253,59 @@ class ResumeTests(ResearchRunTestCase):
         self.assertEqual(tuple(failed), ("3.00", "INTERRUPTED"))
 
     def test_missing_baseline_is_taken_on_resume_within_the_window(self) -> None:
-        first = self.run_day(FakeRunner(), book_queue=books(crossed=True))
-        self.assertEqual((first.forecasts, first.baselines, first.traded), (1, 0, 0))
+        # Crossed pair (refused) + good pair (for retry)
+        queue = books(crossed=True) + books()
+        first = self.run_day(FakeRunner(), book_queue=queue)
+        # Baseline taken in retry, 2 trades (primary + shadow_mid portfolio)
+        self.assertEqual((first.forecasts, first.baselines, first.traded), (1, 1, 2))
         second = self.run_day(FakeRunner(), book_queue=books(),
                               start=NOW + timedelta(minutes=10))
-        self.assertEqual((second.baselines, second.traded), (1, 2))
+        self.assertEqual((second.baselines, second.traded), (0, 0))
 
     def test_expired_baseline_is_marked_no_timely_baseline(self) -> None:
-        self.run_day(FakeRunner(), book_queue=books(crossed=True))
+        # Crossed pair (refused in immediate baseline) + crossed pair (refused in retry)
+        self.run_day(FakeRunner(), book_queue=books(crossed=True) + books(crossed=True))
         later = self.run_day(FakeRunner(), book_queue=[], start=NOW + timedelta(minutes=45))
         self.assertEqual(later.no_timely_baseline, 1)
         kinds = [r[0] for r in self.conn.execute("SELECT kind FROM decisions")]
         self.assertEqual(kinds, ["NO_TIMELY_BASELINE", "NO_TIMELY_BASELINE"])
+
+
+class CrashPathTests(ResearchRunTestCase):
+    def test_runner_crash_leaves_the_attempt_for_recovery(self) -> None:
+        def crashing_runner(_: Any) -> Any:
+            raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            self.run_day(crashing_runner)  # type: ignore
+        # Get the LATEST run (not the seed run from setup)
+        run_status = self.scalar("SELECT status FROM runs WHERE command = 'research'")
+        self.assertEqual(run_status, "FAILED")
+        attempt_status = self.scalar("SELECT status FROM research_attempts")
+        self.assertEqual(attempt_status, "STARTED")
+        # Second run recovers it
+        summary = self.run_day(FakeRunner(), book_queue=books(), start=NOW + timedelta(hours=1))
+        self.assertEqual(summary.recovered, 1)
+
+    def test_failed_immediate_baseline_is_retried_in_the_same_run(self) -> None:
+        # First pair is crossed (refused), second pair is good
+        crossed_pair = books(crossed=True)
+        good_pair = books()
+        queue = crossed_pair + good_pair
+        summary = self.run_day(FakeRunner(), book_queue=queue)
+        self.assertEqual((summary.forecasts, summary.baselines, summary.traded), (1, 1, 2))
+
+    def test_record_failure_closes_the_attempt_with_detail(self) -> None:
+        runner = FakeRunner()
+        with mock.patch("predict_agent.research_run.record_forecast",
+                       side_effect=LedgerError("cohort closed")):
+            summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(dict(summary.failed), {"RECORD_FAILED": 1})
+        attempt = self.conn.execute("SELECT status FROM research_attempts").fetchone()
+        self.assertEqual(attempt[0], "FAILED")
+        refusal = self.conn.execute(
+            "SELECT reason_code, detail FROM refusals WHERE stage = 'research'").fetchone()
+        self.assertEqual(refusal[0], "RECORD_FAILED")
+        self.assertIn("cohort closed", refusal[1])
 
 
 class CliTests(ResearchRunTestCase):

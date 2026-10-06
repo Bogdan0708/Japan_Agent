@@ -145,7 +145,7 @@ def take_baseline(
         attach_baseline(conn, forecast_id, snapshots["YES"], snapshots["NO"], now_fn())
     except ForecastError as error:
         record_refusal(
-            conn, run_id, market["condition_id"], "baseline", "LATE_BASELINE", str(error),
+            conn, run_id, market["condition_id"], "baseline", "BASELINE_REFUSED", str(error),
             now_fn(),
         )
         return False
@@ -172,7 +172,6 @@ def research_market(
     detail (tool names, SDK error type, schema problem) is kept in the run's refusals."""
     rules = json.loads(row["rules_json"])
     started = now_fn()
-    attempt_id = start_attempt(conn, cohort_id, row["condition_id"], "entry", started)
     user_prompt = render_user_prompt(
         question=rules["question"],
         rules_text=rules["rules_text"],
@@ -180,6 +179,7 @@ def research_market(
         end_date=parse_datetime(rules["end_date"]),
         today=started,
     )
+    attempt_id = start_attempt(conn, cohort_id, row["condition_id"], "entry", started)
     outcome = runner(
         ResearchRequest(
             system_prompt=SYSTEM_PROMPT,
@@ -233,8 +233,10 @@ def research_market(
     )
     try:
         return record_forecast(conn, record, now), None
-    except LedgerError:
+    except LedgerError as error:
         fail_attempt(conn, attempt_id, cost, "RECORD_FAILED", now_fn())
+        record_refusal(conn, run_id, condition_id, "research", "RECORD_FAILED", str(error),
+                       now_fn())
         return None, "RECORD_FAILED"
 
 
@@ -252,7 +254,9 @@ def resume_forecasts(
         for forecast_id in unfinished_forecasts(conn, cohort_id):
             step = resume_step(conn, forecast_id, now_fn())
             if step is ResumeStep.NEEDS_BASELINE:
-                summary.baselines += take_baseline(conn, client, forecast_id, run_id, now_fn)
+                if take_baseline(conn, client, forecast_id, run_id, now_fn):
+                    summary.baselines += 1
+                    summary.traded += trade_ready(conn, now_fn()).traded
             elif step is ResumeStep.BASELINE_EXPIRED:
                 mark_no_timely_baseline(conn, forecast_id, now_fn())
                 summary.no_timely_baseline += 1
@@ -311,6 +315,7 @@ def run_research_day(
             if take_baseline(conn, client, forecast_id, run_id, now_fn):
                 summary.baselines += 1
                 summary.traded += trade_ready(conn, now_fn()).traded
+        resume_forecasts(conn, client, run_id, summary, now_fn)
     except BaseException:
         finish_run(conn, run_id, "FAILED", now_fn())
         raise
