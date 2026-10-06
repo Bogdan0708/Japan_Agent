@@ -252,6 +252,60 @@ def discover(
     return DiscoverySummary(markets_seen=len(seen), eligible=eligible, refusals=dict(refusals))
 
 
+def snapshot_book(
+    conn: sqlite3.Connection,
+    client: JsonClient,
+    *,
+    run_id: str,
+    source_run_id: str,
+    condition_id: str,
+    outcome: str,
+    token_id: str,
+    fees_enabled: int,
+    fee_schedule_json: str | None,
+    now_fn: Callable[[], datetime],
+) -> int | None:
+    """Fetch, validate and store one token's book. Returns the snapshot id, or None after
+    recording the refusal (fetch/parse error or an unusable book)."""
+    try:
+        raw = fetch_book(client, token_id)
+        fetched_at = now_fn()
+        snapshot = parse_book(raw, fetched_at)
+    except (FetchError, ParseError) as error:
+        code = "FETCH_ERROR" if isinstance(error, FetchError) else "PARSE_ERROR"
+        record_refusal(conn, run_id, condition_id, "snapshot", code, str(error), now_fn())
+        return None
+    reason = book_refusal(snapshot, condition_id, token_id)
+    if reason is not None:
+        record_refusal(conn, run_id, condition_id, "snapshot", reason, outcome, fetched_at)
+        return None
+    digest = snapshot_hash(snapshot)
+    with transaction(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO book_snapshots (run_id, source_run_id, condition_id, "
+            "token_id, outcome, observed_at, fetched_at, record_json, fees_enabled, "
+            "fee_schedule_json, snapshot_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                source_run_id,
+                condition_id,
+                token_id,
+                outcome,
+                isoformat(snapshot.observed_at),
+                isoformat(snapshot.fetched_at),
+                canonical_json(snapshot.record()),
+                fees_enabled,
+                fee_schedule_json,
+                digest,
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM book_snapshots WHERE snapshot_hash = ?", (digest,)
+        ).fetchone()
+    snapshot_id: int = row["id"]
+    return snapshot_id
+
+
 def snapshot_eligible(
     conn: sqlite3.Connection,
     client: JsonClient,
@@ -268,40 +322,19 @@ def snapshot_eligible(
     stored = 0
     for row in rows:
         for outcome, token_id in (("YES", row["yes_token_id"]), ("NO", row["no_token_id"])):
-            condition_id = row["condition_id"]
-            try:
-                raw = fetch_book(client, token_id)
-                fetched_at = now_fn()
-                snapshot = parse_book(raw, fetched_at)
-            except (FetchError, ParseError) as error:
-                code = "FETCH_ERROR" if isinstance(error, FetchError) else "PARSE_ERROR"
-                record_refusal(conn, run_id, condition_id, "snapshot", code, str(error), now_fn())
-                continue
-            reason = book_refusal(snapshot, condition_id, token_id)
-            if reason is not None:
-                record_refusal(conn, run_id, condition_id, "snapshot", reason, outcome, fetched_at)
-                continue
-            digest = snapshot_hash(snapshot)
-            with transaction(conn):
-                conn.execute(
-                    "INSERT OR IGNORE INTO book_snapshots (run_id, source_run_id, condition_id, "
-                    "token_id, outcome, observed_at, fetched_at, record_json, fees_enabled, "
-                    "fee_schedule_json, snapshot_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        run_id,
-                        source_run_id,
-                        condition_id,
-                        token_id,
-                        outcome,
-                        isoformat(snapshot.observed_at),
-                        isoformat(snapshot.fetched_at),
-                        canonical_json(snapshot.record()),
-                        row["fees_enabled"],
-                        row["fee_schedule_json"],
-                        digest,
-                    ),
-                )
-            stored += 1
+            snapshot_id = snapshot_book(
+                conn,
+                client,
+                run_id=run_id,
+                source_run_id=source_run_id,
+                condition_id=row["condition_id"],
+                outcome=outcome,
+                token_id=token_id,
+                fees_enabled=row["fees_enabled"],
+                fee_schedule_json=row["fee_schedule_json"],
+                now_fn=now_fn,
+            )
+            stored += snapshot_id is not None
     return stored
 
 

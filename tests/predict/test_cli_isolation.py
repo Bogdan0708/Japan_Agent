@@ -40,6 +40,31 @@ class IsolationTests(unittest.TestCase):
                     with self.subTest(file=path.name, module=name):
                         self.assertFalse(name.startswith("japan_agent"))
 
+    def test_research_package_cannot_reach_prices_money_or_trading(self) -> None:
+        # Spec §6/§8: the research layer imports nothing that touches money, policy,
+        # paper trading or market data, so no code path can hand Claude a price.
+        forbidden = {
+            "policy", "policy_params", "paper", "tickets", "cash", "settlement", "fills",
+            "invariants", "budget", "research_run", "collect", "clob", "http", "gamma",
+            "report", "db",
+        }
+        for path in (PACKAGE / "research").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                modules: list[str] = []
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if node.level >= 2 or module.startswith("predict_agent."):
+                        modules = [module.removeprefix("predict_agent.").split(".")[0]]
+                        modules += [alias.name for alias in node.names]
+                elif isinstance(node, ast.Import):
+                    modules = [alias.name.removeprefix("predict_agent.").split(".")[0]
+                               for alias in node.names
+                               if alias.name.startswith("predict_agent.")]
+                for module in modules:
+                    with self.subTest(file=path.name, module=module):
+                        self.assertNotIn(module, forbidden)
+
     def test_no_write_http_methods_or_signing_in_package(self) -> None:
         forbidden = ("method=\"POST\"", "method='POST'", "eth_account", "private_key", "sign_order")
         for path in PACKAGE.rglob("*.py"):
