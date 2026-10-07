@@ -58,7 +58,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install the predict extra
-        run: python -m pip install ".[predict]"
+        run: python -m pip install ".[predict]" "claude-agent-sdk==0.2.163"
 
       - name: Run the SDK adapter tests against the real SDK option names
         env:
