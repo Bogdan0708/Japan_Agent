@@ -370,7 +370,7 @@ def resume_forecasts(
             if step is ResumeStep.NEEDS_BASELINE:
                 if take_baseline(conn, client, forecast_id, run_id, now_fn):
                     summary.baselines += 1
-                    summary.traded += trade_ready(conn, now_fn()).traded
+                    summary.traded += trade_ready(conn, now_fn).traded
             elif step is ResumeStep.BASELINE_EXPIRED:
                 pair = stored_baseline(conn, forecast_id)
                 if pair is not None:
@@ -381,7 +381,7 @@ def resume_forecasts(
                                        str(error), now_fn())
                     else:
                         summary.baselines += 1
-                        summary.traded += trade_ready(conn, now_fn()).traded
+                        summary.traded += trade_ready(conn, now_fn).traded
                         continue
                 mark_no_timely_baseline(conn, forecast_id, now_fn())
                 summary.no_timely_baseline += 1
@@ -422,7 +422,7 @@ def run_research_day(
             recover_interrupted_attempts(conn, research.per_forecast_usd, now_fn())
         )
         resume_forecasts(conn, client, run_id, summary, now_fn)
-        summary.traded += trade_ready(conn, now_fn()).traded
+        summary.traded += trade_ready(conn, now_fn).traded
         stop: str | None = None
         pending = candidates(conn, cohort_id, now_fn(), policy.min_hours_to_close)
         if _discovery_is_stale(conn, now_fn()):
@@ -468,7 +468,7 @@ def run_research_day(
             summary.abstentions += bool(abstained)
             if take_baseline(conn, client, forecast_id, run_id, now_fn):
                 summary.baselines += 1
-                summary.traded += trade_ready(conn, now_fn()).traded
+                summary.traded += trade_ready(conn, now_fn).traded
         resume_forecasts(conn, client, run_id, summary, now_fn)
     except BaseException:
         finish_run(conn, run_id, "FAILED", now_fn())

@@ -62,6 +62,8 @@ class ParsePolicyTests(unittest.TestCase):
             "kelly above 1": broken(kelly_fraction="1.5"),
             "zero bankroll": broken(starting_bankroll="0"),
             "bad confidence": broken(min_confidence="certain"),
+            "list confidence": broken(min_confidence=["high"]),
+            "dict confidence": broken(min_confidence={"high": 1}),
             "caps missing one": broken(caps={"market": "0.02", "event": "0.05",
                                              "category": "0.15"}),
             "cap zero": broken(caps={"market": "0", "event": "0.05", "category": "0.15",

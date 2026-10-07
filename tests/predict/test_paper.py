@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import sqlite3
 import tempfile
 import unittest
+from collections.abc import Iterator
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -10,12 +13,13 @@ from unittest import mock
 
 from predict_agent.cash import available_cash
 from predict_agent.cohorts import cohort_portfolios
-from predict_agent.db import connect
+from predict_agent.db import connect, transaction
 from predict_agent.forecasts import ResumeStep, resume_step
 from predict_agent.invariants import verify_ledger
 from predict_agent.paper import decide_portfolio, trade_ready
 from predict_agent.settlement import settle_open_tickets
 from predict_agent.tickets import equity
+from predict_agent.util import isoformat
 from tests.predict.fixtures import CONDITION_ID, NOW
 from tests.predict.ledger_fixtures import seed_cohort, seed_entry_forecast, seed_observation
 from tests.predict.trade_fixtures import (
@@ -61,7 +65,7 @@ class PaperTestCase(unittest.TestCase):
 class TradeTests(PaperTestCase):
     def test_spec_worked_example_end_to_end_in_both_portfolios(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
-        summary = trade_ready(self.conn, DECIDE_AT)
+        summary = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual((summary.traded, summary.refused, summary.waiting), (2, {}, 0))
         ticket = self.ticket(self.primary)
         self.assertEqual(ticket["outcome"], "YES")
@@ -75,7 +79,7 @@ class TradeTests(PaperTestCase):
 
     def test_primary_refuses_where_the_shadow_mid_policy_trades(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash, p=("0.52", "0.60", "0.70"))
-        summary = trade_ready(self.conn, DECIDE_AT)
+        summary = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual((summary.traded, summary.refused), (1, {"NO_EDGE": 1}))
         self.assertEqual(
             self.decisions(),
@@ -89,7 +93,7 @@ class TradeTests(PaperTestCase):
             self.conn, self.cohort, self.rules_hash, fee_schedule=POLITICS_FEES,
             yes_asks=[("0.50", "20"), ("0.51", "100")],
         )
-        trade_ready(self.conn, DECIDE_AT)
+        trade_ready(self.conn, lambda: DECIDE_AT)
         row = self.conn.execute(
             "SELECT fee, cost_total, fills_json FROM paper_tickets WHERE portfolio_id = ?",
             (self.primary,),
@@ -103,7 +107,7 @@ class TradeTests(PaperTestCase):
     def test_refusals_are_recorded_with_code_and_journal_detail(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
         seed_discovery(self.conn, [], at=NOW + timedelta(seconds=5))  # market dropped out
-        summary = trade_ready(self.conn, DECIDE_AT)
+        summary = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual(summary.refused, {"ELIGIBILITY_LOST": 2})
         payload = json.loads(
             self.conn.execute(
@@ -125,13 +129,15 @@ class TradeTests(PaperTestCase):
                     cross_check="NOT_APPLICABLE",
                     fetched_at=NOW + timedelta(seconds=10),
                 )
-                summary = trade_ready(self.conn, DECIDE_AT)
+                summary = trade_ready(self.conn, lambda: DECIDE_AT)
                 self.assertEqual((summary.traded, summary.refused), (2, {}))
 
     def test_resolution_started_refuses(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
         seed_observation(self.conn, "YES", fetched_at=NOW + timedelta(seconds=10))
-        self.assertEqual(trade_ready(self.conn, DECIDE_AT).refused, {"RESOLUTION_STARTED": 2})
+        self.assertEqual(
+            trade_ready(self.conn, lambda: DECIDE_AT).refused, {"RESOLUTION_STARTED": 2}
+        )
 
     def test_rules_changed_since_the_forecast_refuses(self) -> None:
         from predict_agent.util import canonical_json, sha256_json
@@ -155,18 +161,36 @@ class TradeTests(PaperTestCase):
             "UPDATE markets SET current_rules_hash = ? WHERE condition_id = ?",
             (new_hash, CONDITION_ID),
         )
-        self.assertEqual(trade_ready(self.conn, DECIDE_AT).refused, {"RULES_CHANGED": 2})
+        self.assertEqual(trade_ready(self.conn, lambda: DECIDE_AT).refused, {"RULES_CHANGED": 2})
 
     def test_a_late_decision_on_a_stale_book_refuses_and_is_final(self) -> None:
         forecast = seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
         late = NOW + timedelta(minutes=10)
-        self.assertEqual(trade_ready(self.conn, late).refused, {"STALE_BOOK": 2})
+        self.assertEqual(trade_ready(self.conn, lambda: late).refused, {"STALE_BOOK": 2})
         self.assertEqual(resume_step(self.conn, forecast, late), ResumeStep.DONE)
+
+    def test_book_age_is_measured_after_waiting_for_the_write_lock(self) -> None:
+        seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+        clock = {"now": DECIDE_AT}
+        after_wait = NOW + timedelta(minutes=10)  # well past max_book_age_seconds (120)
+
+        @contextlib.contextmanager
+        def slow_lock(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+            clock["now"] = after_wait  # another writer held the lock this long
+            with transaction(conn):
+                yield conn
+
+        with mock.patch("predict_agent.paper.transaction", slow_lock):
+            summary = trade_ready(self.conn, lambda: clock["now"])
+        self.assertEqual((summary.traded, summary.refused), (0, {"STALE_BOOK": 2}))
+        stamps = {r["decided_at"] for r in self.conn.execute("SELECT decided_at FROM decisions")}
+        self.assertEqual(stamps, {isoformat(after_wait)})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM paper_tickets").fetchone()[0], 0)
 
     def test_closed_cohort_forecasts_are_refused_cohort_closed(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
         seed_cohort(self.conn, model_id="successor")
-        summary = trade_ready(self.conn, DECIDE_AT)
+        summary = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual((summary.traded, summary.refused), (0, {"COHORT_CLOSED": 2}))
 
     def test_rerun_is_idempotent_and_unbaselined_forecasts_wait(self) -> None:
@@ -175,9 +199,9 @@ class TradeTests(PaperTestCase):
         seed_entry_forecast(
             self.conn, self.cohort, seed_tradeable_market(self.conn, other), condition_id=other
         )
-        first = trade_ready(self.conn, DECIDE_AT)
+        first = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual((first.traded, first.waiting), (2, 1))
-        second = trade_ready(self.conn, DECIDE_AT)
+        second = trade_ready(self.conn, lambda: DECIDE_AT)
         self.assertEqual((second.traded, second.refused, second.waiting), (0, {}, 1))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM paper_tickets").fetchone()[0], 2)
 
@@ -187,17 +211,40 @@ class TradeTests(PaperTestCase):
             mock.patch("predict_agent.tickets.append_journal", side_effect=RuntimeError("boom")),
             self.assertRaises(RuntimeError),
         ):
-            decide_portfolio(self.conn, self.primary, forecast, DECIDE_AT)
+            decide_portfolio(self.conn, self.primary, forecast, lambda: DECIDE_AT)
         self.assertEqual(self.decisions(), {})
         self.assertEqual(available_cash(self.conn, self.primary), D("1000"))
-        result = decide_portfolio(self.conn, self.primary, forecast, DECIDE_AT)
+        result = decide_portfolio(self.conn, self.primary, forecast, lambda: DECIDE_AT)
         self.assertIsNotNone(result.ticket_id)
+
+
+    def test_a_concurrent_decision_is_skipped_not_raised(self) -> None:
+        forecast = seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+        first = decide_portfolio(self.conn, self.primary, forecast, lambda: DECIDE_AT)
+        self.assertIsNotNone(first.ticket_id)
+        # A second process read the same undecided list before the first one committed.
+        second = decide_portfolio(self.conn, self.primary, forecast, lambda: DECIDE_AT)
+        self.assertTrue(second.skipped)
+        self.assertIsNone(second.ticket_id)
+        with mock.patch(
+            "predict_agent.paper.undecided_portfolios",
+            return_value=[self.primary, self.shadow],
+        ):
+            summary = trade_ready(self.conn, lambda: DECIDE_AT)
+        self.assertEqual((summary.traded, summary.refused), (1, {}))
+        rows = self.conn.execute(
+            "SELECT portfolio_id FROM decisions WHERE forecast_id = ?", (forecast,)
+        ).fetchall()
+        self.assertEqual(sorted(r["portfolio_id"] for r in rows),
+                         sorted([self.primary, self.shadow]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM paper_tickets").fetchone()[0], 2)
+        self.assertEqual(verify_ledger(self.conn), [])
 
 
 class PortfolioStateTests(PaperTestCase):
     def test_losses_shrink_equity_and_the_next_size(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
-        trade_ready(self.conn, DECIDE_AT)
+        trade_ready(self.conn, lambda: DECIDE_AT)
         seed_observation(self.conn, "NO", fetched_at=NOW + timedelta(days=1))
         settle_open_tickets(self.conn, NOW + timedelta(days=1))
         self.assertEqual(equity(self.conn, self.primary), D("980"))
@@ -207,7 +254,7 @@ class PortfolioStateTests(PaperTestCase):
                                       end_date=later + timedelta(days=20))
         seed_discovery(self.conn, [other], at=later)
         seed_ready_forecast(self.conn, self.cohort, rules, condition_id=other, at=later)
-        trade_ready(self.conn, later + timedelta(seconds=30))
+        trade_ready(self.conn, lambda: later + timedelta(seconds=30))
         row = self.conn.execute(
             "SELECT cost_total FROM paper_tickets WHERE portfolio_id = ? AND condition_id = ?",
             (self.primary, other),
@@ -220,7 +267,7 @@ class PortfolioStateTests(PaperTestCase):
             rules = seed_tradeable_market(self.conn, condition_id, event_id="shared")
             seed_ready_forecast(self.conn, self.cohort, rules, condition_id=condition_id)
         seed_discovery(self.conn, markets)
-        trade_ready(self.conn, DECIDE_AT)
+        trade_ready(self.conn, lambda: DECIDE_AT)
         costs = [
             D(row["cost_total"])
             for row in self.conn.execute(

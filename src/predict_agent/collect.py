@@ -29,7 +29,7 @@ from .resolution import (
     reconcile_outcome,
     resolution_refusal,
 )
-from .util import canonical_json, isoformat, sha256_json
+from .util import canonical_json, isoformat, parse_datetime, sha256_json
 
 GEOBLOCK_URL = "https://polymarket.com/api/geoblock"
 
@@ -252,6 +252,26 @@ def discover(
     return DiscoverySummary(markets_seen=len(seen), eligible=eligible, refusals=dict(refusals))
 
 
+def fee_in_force(
+    conn: sqlite3.Connection, condition_id: str, at: datetime, fallback: tuple[int, str | None]
+) -> tuple[int, str | None]:
+    """(fees_enabled, fee_schedule_json) as last observed at or before `at`: the latest
+    discovery row for the market by parsed observation time (rowid breaks ties), from any
+    discovery run, never one observed after `at`. `fallback` (the source discovery row's
+    fees_enabled and schedule) applies only when no row qualifies."""
+    best: tuple[datetime, int] | None = None
+    chosen = fallback
+    for row in conn.execute(
+        "SELECT rowid, fees_enabled, fee_schedule_json, observed_at FROM discoveries "
+        "WHERE condition_id = ?",
+        (condition_id,),
+    ):
+        key = (parse_datetime(row["observed_at"]), int(row["rowid"]))
+        if key[0] <= at and (best is None or key > best):
+            best, chosen = key, (int(row["fees_enabled"]), row["fee_schedule_json"])
+    return chosen
+
+
 def snapshot_book(
     conn: sqlite3.Connection,
     client: JsonClient,
@@ -266,7 +286,8 @@ def snapshot_book(
     now_fn: Callable[[], datetime],
 ) -> int | None:
     """Fetch, validate and store one token's book. Returns the snapshot id, or None after
-    recording the refusal (fetch/parse error or an unusable book)."""
+    recording the refusal (fetch/parse error or an unusable book). The stored fee is the one
+    in force when the book was fetched (`fee_in_force`); the given fee is the fallback."""
     try:
         raw = fetch_book(client, token_id)
         fetched_at = now_fn()
@@ -281,6 +302,9 @@ def snapshot_book(
         return None
     digest = snapshot_hash(snapshot)
     with transaction(conn):
+        fees_in_force, schedule_in_force = fee_in_force(
+            conn, condition_id, snapshot.fetched_at, (fees_enabled, fee_schedule_json)
+        )
         conn.execute(
             "INSERT OR IGNORE INTO book_snapshots (run_id, source_run_id, condition_id, "
             "token_id, outcome, observed_at, fetched_at, record_json, fees_enabled, "
@@ -294,8 +318,8 @@ def snapshot_book(
                 isoformat(snapshot.observed_at),
                 isoformat(snapshot.fetched_at),
                 canonical_json(snapshot.record()),
-                fees_enabled,
-                fee_schedule_json,
+                fees_in_force,
+                schedule_in_force,
                 digest,
             ),
         )
@@ -314,8 +338,9 @@ def snapshot_eligible(
     now_fn: Callable[[], datetime],
 ) -> int:
     """Snapshot books for the markets discovery run `source_run_id` found eligible. Books and
-    refusals belong to the acquiring run `run_id`; tokens and the fee schedule come from the
-    immutable discovery row (so the fee is as observed at discovery time)."""
+    refusals belong to the acquiring run `run_id`; tokens come from the source run's
+    discovery row, and the fee is the one in force when the book was fetched (the latest
+    discovery observation at or before the fetch, from any run; see `fee_in_force`)."""
     rows = conn.execute(
         "SELECT * FROM discoveries WHERE run_id = ? ORDER BY condition_id", (source_run_id,)
     ).fetchall()

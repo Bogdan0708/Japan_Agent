@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -300,6 +300,39 @@ class CorrectionPassCollectTests(CollectTestCase):
         rows = self.conn.execute("SELECT run_id, source_run_id FROM book_snapshots").fetchall()
         pairs = {(r["run_id"], r["source_run_id"]) for r in rows}
         self.assertEqual(pairs, {(snap_run, self.run_id)})
+
+    def test_snapshot_carries_the_fee_in_force_when_its_book_was_fetched(self) -> None:
+        def discover_at(run_id: str, at: datetime, rate: float) -> None:
+            fees = {"exponent": 1, "rate": rate, "takerOnly": True, "rebateRate": 0.25}
+            opener = RoutedOpener(
+                events_routes(
+                    {"politics": [gamma_event([gamma_market(feeSchedule=fees)])]},
+                    [resolution_row()],
+                )
+            )
+            discover(self.conn, self.client(opener), CONFIG, run_id, at)
+
+        discover_at(self.run_id, NOW, 0.04)  # the snapshot's source run
+        # A newer discovery (still running, so not the "latest completed" source) observed
+        # a fee change before the book fetch; a later one observed after it must not count.
+        discover_at(start_run(self.conn, "discover", POLICY_HASH, NOW), NOW + timedelta(
+            minutes=1), 0.07)
+        discover_at(start_run(self.conn, "discover", POLICY_HASH, NOW), NOW + timedelta(
+            minutes=5), 0.10)
+        opener = RoutedOpener(
+            {
+                f"token_id={YES_TOKEN}": [clob_book()],
+                f"token_id={NO_TOKEN}": [clob_book(asset_id=NO_TOKEN)],
+            }
+        )
+        fetched = NOW + timedelta(minutes=2)
+        snap_run = start_run(self.conn, "snapshot", POLICY_HASH, fetched)
+        snapshot_eligible(self.conn, self.client(opener), self.run_id, snap_run, lambda: fetched)
+        rates = {
+            json.loads(r["fee_schedule_json"])["rate"]
+            for r in self.conn.execute("SELECT fee_schedule_json FROM book_snapshots")
+        }
+        self.assertEqual(rates, {0.07})
 
     def test_poll_refreshes_rules_when_parent_event_closed(self) -> None:
         self.discover_one(self.run_id)
