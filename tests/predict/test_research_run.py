@@ -19,7 +19,7 @@ from unittest import mock
 from predict_agent.budget import INTERRUPTED
 from predict_agent.cash import LedgerError
 from predict_agent.cli import main
-from predict_agent.cohorts import cohort_id_for
+from predict_agent.cohorts import cohort_id_for, ensure_cohort
 from predict_agent.db import connect
 from predict_agent.forecasts import fail_attempt, start_attempt
 from predict_agent.http import JsonClient
@@ -34,8 +34,10 @@ from predict_agent.research_run import (
     cohort_identity,
     run_research_day,
 )
+from predict_agent.util import parse_datetime
 from tests.predict.fakes import RoutedOpener
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN, clob_book
+from tests.predict.ledger_fixtures import seed_observation, seed_snapshot
 from tests.predict.trade_fixtures import seed_discovery, seed_tradeable_market
 
 REPO = Path(__file__).resolve().parents[2]
@@ -457,6 +459,136 @@ class OverlapTests(ResearchRunTestCase):
         self.assertEqual(refusal[0], "RECORD_FAILED")
         self.assertIn("cohort closed", refusal[1])
         self.assertEqual(self.scalar("SELECT error FROM research_attempts"), INTERRUPTED)
+
+
+class FrozenCapRecoveryTests(ResearchRunTestCase):
+    def test_interrupted_attempt_is_charged_at_its_own_cohorts_cap(self) -> None:
+        # The attempt ran under a $3 cohort; the config now says $1 with a $3 daily cap.
+        old = replace(RESEARCH, per_forecast_usd=Decimal("3"), daily_usd=Decimal("3"))
+        cohort = ensure_cohort(self.conn, cohort_identity(self.conn, POLICY, old, NOW),
+                               starting_bankroll=POLICY.starting_bankroll,
+                               code_version="test", now=NOW)
+        attempt = start_attempt(self.conn, cohort, CONDITION_ID, "entry", NOW)
+        runner = FakeRunner()
+        summary = self.run_day(runner, research=replace(old, per_forecast_usd=Decimal("1")),
+                               start=NOW + timedelta(minutes=1))
+        charged = self.conn.execute(
+            "SELECT cost_usd FROM research_attempts WHERE attempt_id = ?", (attempt,)
+        ).fetchone()[0]
+        self.assertEqual(charged, "3")
+        self.assertEqual(runner.requests, [])  # the day's $3 is spent: no new paid call
+        self.assertEqual((summary.forecasts, dict(summary.skipped)), (0, {"BUDGET": 1}))
+
+
+class ResolvedMarketTests(ResearchRunTestCase):
+    def test_market_whose_resolution_has_started_is_not_researched(self) -> None:
+        for status in ("resolved", "proposed", "disputed"):
+            with self.subTest(status):
+                self.tearDown()
+                self.setUp()
+                seed_observation(self.conn, "YES" if status == "resolved" else None,
+                                 status=status, fetched_at=NOW - timedelta(minutes=1))
+                runner = FakeRunner()
+                summary = self.run_day(runner, book_queue=[])
+                self.assertEqual((len(runner.requests), summary.forecasts), (0, 0))
+                self.assertEqual(self.scalar("SELECT COUNT(*) FROM forecasts"), 0)
+
+    def test_market_observed_open_is_still_researched(self) -> None:
+        seed_observation(self.conn, None, status="active", fetched_at=NOW - timedelta(minutes=1))
+        summary = self.run_day(FakeRunner())
+        self.assertEqual(summary.forecasts, 1)
+
+    def test_market_resolved_during_research_records_no_forecast(self) -> None:
+        def resolving(request: ResearchRequest) -> ResearchOutcome:
+            seed_observation(self.conn, "YES", fetched_at=NOW)
+            return outcome(cost_usd=Decimal("0.75"))
+
+        summary = self.run_day(resolving, book_queue=[])  # type: ignore[arg-type]
+        self.assertEqual((summary.forecasts, dict(summary.failed)), (0, {"MARKET_RESOLVED": 1}))
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM forecasts"), 0)
+        attempt = self.conn.execute(
+            "SELECT status, cost_usd, error FROM research_attempts").fetchone()
+        self.assertEqual(tuple(attempt), ("FAILED", "0.75", "MARKET_RESOLVED"))
+        refusal = self.conn.execute(
+            "SELECT reason_code FROM refusals WHERE stage = 'research'").fetchone()
+        self.assertEqual(refusal[0], "MARKET_RESOLVED")
+        self.assertEqual(verify_ledger(self.conn), [])
+
+
+class PromptExposureTests(ResearchRunTestCase):
+    def test_price_in_the_market_description_is_flagged(self) -> None:
+        market = OTHER[0]
+        seed_tradeable_market(
+            self.conn, market, end_date=NOW + timedelta(days=20),
+            rules_text="Resolves YES if it happens. Polymarket traders give it a 62% chance.",
+        )
+        seed_discovery(self.conn, [market], at=NOW - timedelta(minutes=30))
+        runner = FakeRunner()
+        self.run_day(runner, book_queue=books(market))
+        self.assertIn("Polymarket", runner.requests[0].user_prompt)
+        flags = json.loads(self.scalar("SELECT body_json FROM forecasts"))["exposure_flags"]
+        self.assertIn("venue:polymarket", flags)
+        self.assertIn("phrase:traders_price", flags)
+
+    def test_the_fixed_system_prompt_raises_no_flag(self) -> None:
+        # SYSTEM_PROMPT names "prediction markets" and "odds" to forbid them: not exposure.
+        self.run_day(FakeRunner())
+        self.assertEqual(
+            json.loads(self.scalar("SELECT body_json FROM forecasts"))["exposure_flags"], [])
+
+
+class ReportedModelTests(ResearchRunTestCase):
+    def test_reported_model_is_kept_in_the_stored_transcript(self) -> None:
+        self.run_day(FakeRunner(outcome(reported_model="claude-opus-5-5-20260901")))
+        transcript = json.loads(self.scalar(
+            "SELECT content FROM artifacts WHERE kind = 'tool_transcript'"))
+        session = transcript[0]
+        self.assertEqual(session["event"], "session")
+        self.assertEqual(session["requested_model"], RESEARCH.model)
+        self.assertEqual(session["reported_model"], "claude-opus-5-5-20260901")
+
+
+class BaselineRecoveryTests(ResearchRunTestCase):
+    def crash_after_storing_books(self) -> None:
+        with mock.patch("predict_agent.research_run.attach_baseline",
+                        side_effect=RuntimeError("crash after storing books")), \
+                self.assertRaises(RuntimeError):
+            self.run_day(FakeRunner())
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM book_snapshots"), 2)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM forecast_baselines"), 0)
+
+    def test_timely_books_stored_before_a_crash_become_the_baseline(self) -> None:
+        self.crash_after_storing_books()
+        resumed = self.run_day(FakeRunner(), book_queue=[], start=NOW + timedelta(minutes=45))
+        self.assertEqual((resumed.no_timely_baseline, resumed.baselines), (0, 1))
+        row = self.conn.execute(
+            "SELECT b.reason, y.outcome, n.outcome FROM forecast_baselines b "
+            "JOIN book_snapshots y ON y.id = b.yes_snapshot_id "
+            "JOIN book_snapshots n ON n.id = b.no_snapshot_id").fetchone()
+        self.assertEqual(tuple(row), (None, "YES", "NO"))
+        self.assertEqual(verify_ledger(self.conn), [])
+
+    def test_earliest_in_window_pair_is_attached_and_late_books_are_ignored(self) -> None:
+        self.crash_after_storing_books()
+        early = {r[0]: r[1] for r in self.conn.execute(
+            "SELECT outcome, id FROM book_snapshots")}
+        created = parse_datetime(self.scalar("SELECT created_at FROM forecasts"))
+        late = created + timedelta(seconds=RESEARCH.baseline_window_seconds + 60)
+        seed_snapshot(self.conn, "YES", late)
+        seed_snapshot(self.conn, "NO", late)
+        self.run_day(FakeRunner(), book_queue=[], start=NOW + timedelta(minutes=45))
+        attached = self.conn.execute(
+            "SELECT yes_snapshot_id, no_snapshot_id FROM forecast_baselines").fetchone()
+        self.assertEqual(tuple(attached), (early["YES"], early["NO"]))
+
+    def test_books_fetched_before_the_forecast_are_not_a_baseline(self) -> None:
+        seed_snapshot(self.conn, "YES", NOW - timedelta(minutes=5))
+        seed_snapshot(self.conn, "NO", NOW - timedelta(minutes=5))
+        self.run_day(FakeRunner(), book_queue=books(crossed=True) + books(crossed=True))
+        later = self.run_day(FakeRunner(), book_queue=[], start=NOW + timedelta(minutes=45))
+        self.assertEqual(later.no_timely_baseline, 1)
+        self.assertEqual(self.scalar("SELECT reason FROM forecast_baselines"),
+                         "NO_TIMELY_BASELINE")
 
 
 class CliTests(ResearchRunTestCase):

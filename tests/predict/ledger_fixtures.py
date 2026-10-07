@@ -156,6 +156,7 @@ def seed_cohort(
     model_id: str = "m1",
     bankroll: str = "1000",
     shadow: bool = False,
+    research_settings: dict[str, Any] | None = None,
 ) -> str:
     portfolios = {PRIMARY: store_artifact(conn, "policy", PRIMARY_POLICY, NOW)}
     if shadow:
@@ -164,7 +165,7 @@ def seed_cohort(
         portfolios=portfolios,
         prompt_hash=store_artifact(conn, "prompt", "Forecast without market prices.", NOW),
         model_id=model_id,
-        research_settings={"tools": ["WebSearch", "WebFetch"]},
+        research_settings=research_settings or {"tools": ["WebSearch", "WebFetch"]},
         scoring_version="1",
         baseline_window_seconds=WINDOW_SECONDS,
     )

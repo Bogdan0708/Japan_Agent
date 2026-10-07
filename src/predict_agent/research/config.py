@@ -32,6 +32,9 @@ _KEYS = frozenset(
         "generation",
     }
 )
+# A pinned model id: "claude-" plus lowercase words with at least one digit (a version or
+# date), so floating aliases ("opus", "sonnet", "claude-opus-latest") are refused.
+_MODEL_ID = re.compile(r"claude-[a-z0-9-]*\d[a-z0-9-]*")
 _DOMAIN = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 
@@ -86,8 +89,15 @@ def parse_research(raw: object) -> ResearchConfig:
         unknown = sorted(set(raw) - _KEYS)
         raise ConfigError(f"research: missing keys {missing}, unknown keys {unknown}")
     model = raw["model"]
-    if not isinstance(model, str) or not model.strip():
-        raise ConfigError("research.model must be a model id")
+    if (
+        not isinstance(model, str)
+        or not _MODEL_ID.fullmatch(model)
+        or model.endswith("-latest")
+    ):
+        raise ConfigError(
+            "research.model must be a full versioned model id such as claude-opus-5-5, "
+            "not a floating alias"
+        )
     scoring_version = raw["scoring_version"]
     if not isinstance(scoring_version, str) or not scoring_version:
         raise ConfigError("research.scoring_version must be a non-empty string")

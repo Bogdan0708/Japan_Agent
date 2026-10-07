@@ -11,6 +11,11 @@ Isolation, all fail closed:
   denies anything the hook does not explicitly allow.
 - A PostToolUse hook records every tool input and result into the transcript; a
   PostToolUseFailure hook records every failed tool call (input and error) the same way.
+- A WebFetch URL becomes citable evidence only when its result shows a real page: the CLI
+  reports HTTP errors and cross-host redirect notices as ordinary completions shaped
+  `{bytes, code, codeText, result, durationMs, url}`, so only an integer `code` in
+  200..299 with `bytes` > 0 is admitted; anything else (a string, no `code`) is not.
+- The model the init report names is recorded (`reported_model`), never enforced.
 - The session's own init report must list no tool outside EXPECTED_SESSION_TOOLS and no
   MCP server, or the run is aborted before any tool executes."""
 
@@ -70,6 +75,9 @@ class ResearchOutcome:
     cost_usd: Decimal | None
     error: str | None  # refusal code; None on success
     detail: str
+    # The init report's `model` field, as reported (None when absent). Recorded, not
+    # enforced: the field is unverified until the live smoke run.
+    reported_model: str | None = None
 
 
 def load_sdk() -> ModuleType:
@@ -122,6 +130,18 @@ def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
         if domain in lowered or domain.replace(".", "-") in lowered:
             return f"url refers to blocked domain {domain}"
     return None
+
+
+def fetch_admitted(response: object) -> bool:
+    """True when a WebFetch result is a real page: a dict with an integer HTTP `code` in
+    200..299 and a positive integer `bytes`. Error pages, redirect notices, empty bodies
+    and unrecognised shapes are not citable (fail closed)."""
+    if not isinstance(response, Mapping):
+        return False
+    code, size = response.get("code"), response.get("bytes")
+    if isinstance(code, bool) or not isinstance(code, int) or not 200 <= code <= 299:
+        return False
+    return not isinstance(size, bool) and isinstance(size, int) and size > 0
 
 
 class _Session:
@@ -195,16 +215,19 @@ class _Session:
             if name == STRUCTURED_OUTPUT_TOOL:
                 return {}
             tool_input = dict(input_data.get("tool_input") or {})
-            self.transcript.append(
-                {
-                    "event": "result",
-                    "tool": str(name),
-                    "input": tool_input,
-                    "output": input_data.get("tool_response"),
-                }
-            )
-            if name == "WebFetch" and isinstance(tool_input.get("url"), str):
-                self.fetched.add(tool_input["url"])
+            response = input_data.get("tool_response")
+            event: dict[str, Any] = {
+                "event": "result",
+                "tool": str(name),
+                "input": tool_input,
+                "output": response,
+            }
+            if name == "WebFetch":
+                admitted = isinstance(tool_input.get("url"), str) and fetch_admitted(response)
+                event["admitted"] = admitted
+                if admitted:
+                    self.fetched.add(tool_input["url"])
+            self.transcript.append(event)
             return {}
         except Exception:  # noqa: BLE001
             self.hook_error = True
@@ -289,6 +312,7 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
     cost: Decimal | None = None
     error: str | None = None
     detail = ""
+    reported_model: str | None = None
     with tempfile.TemporaryDirectory(prefix="predict-research-") as cwd:
         options = build_options(sdk, request, session, cwd)
         try:
@@ -296,6 +320,8 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
                 await client.query(request.user_prompt)
                 async for message in client.receive_response():
                     if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
+                        model = message.data.get("model")
+                        reported_model = model if isinstance(model, str) else None
                         problem = toolset_problem(message.data)
                         if problem is not None:
                             error, detail = "TOOLSET_MISMATCH", problem
@@ -334,6 +360,7 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
         cost_usd=cost,
         error=error,
         detail=detail,
+        reported_model=reported_model,
     )
 
 

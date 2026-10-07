@@ -57,11 +57,12 @@ def seed_tradeable_market(
     event_id: str = "e1",
     category: str = "politics",
     end_date: datetime = NOW + timedelta(days=20),
+    rules_text: str = "Resolves Yes if it happens by the end date.",
 ) -> str:
     """A market with its rules version and markets row; returns the rules hash."""
     payload = {
         "question": f"Will {condition_id[:8]} happen?",
-        "rules_text": "Resolves Yes if it happens by the end date.",
+        "rules_text": rules_text,
         "resolution_source": "",
         "end_date": isoformat(end_date),
     }

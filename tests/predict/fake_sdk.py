@@ -68,15 +68,36 @@ class ResultMessage:
     structured_output: Any = None
 
 
+def fetch_page(
+    url: str, *, code: int = 200, text: str = "page text", size: int | None = None
+) -> dict[str, Any]:
+    """A WebFetch result as CLI 2.1.286 returns it. HTTP errors and cross-host redirect
+    notices come back in this same shape (as ordinary completions) with their status code."""
+    return {
+        "bytes": len(text.encode()) if size is None else size,
+        "code": code,
+        "codeText": "OK" if code == 200 else str(code),
+        "result": text,
+        "durationMs": 1,
+        "url": url,
+    }
+
+
 @dataclass
 class ToolCall:
     """One scripted tool call: run through PreToolUse, and (when allowed) PostToolUse with
-    `response` as the tool result."""
+    `response` as the tool result. A WebFetch call without a response gets a real-shaped
+    200 page for its URL."""
 
     tool: str
     tool_input: dict[str, Any]
     response: Any = None
     error: str | None = None  # when set, the call fails: PostToolUseFailure fires
+
+    def __post_init__(self) -> None:
+        url = self.tool_input.get("url")
+        if self.tool == "WebFetch" and self.response is None and isinstance(url, str):
+            self.response = fetch_page(url)
 
 
 @dataclass
@@ -94,6 +115,7 @@ class Script:
     )
     raise_error: Exception | None = None
     send_init: bool = True
+    model: str | None = "claude-test"  # the init report's model field (None: absent)
     early_calls: list[ToolCall] = field(default_factory=list)
     send_result: bool = True
 
@@ -149,9 +171,10 @@ class FakeClient:
             self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
             await self._post(hooks, call, tool_input)
         if script.send_init:
-            yield SystemMessage(
-                "init", {"tools": script.tools, "mcp_servers": script.mcp_servers}
-            )
+            init: dict[str, Any] = {"tools": script.tools, "mcp_servers": script.mcp_servers}
+            if script.model is not None:
+                init["model"] = script.model
+            yield SystemMessage("init", init)
         for call in script.calls:
             pre = {"tool_name": call.tool, "tool_input": call.tool_input}
             decision = await hooks["PreToolUse"][0].hooks[0](pre, "toolu_1", {"signal": None})

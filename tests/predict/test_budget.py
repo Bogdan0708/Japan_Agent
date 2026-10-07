@@ -76,5 +76,63 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(cost, "1")
 
 
+class FrozenCapTests(unittest.TestCase):
+    """An attempt is charged at the per-forecast cap frozen in its own cohort's identity,
+    not at the running config's cap (which may belong to a newer cohort)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self._tmp.name) / "data" / "predict.sqlite3")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def cohort(self, model_id: str, per_forecast_usd: object = None) -> str:
+        settings: dict[str, object] = {"tools": ["WebSearch", "WebFetch"]}
+        if per_forecast_usd is not None:
+            settings["per_forecast_usd"] = per_forecast_usd
+        return seed_cohort(self.conn, model_id=model_id, research_settings=settings)
+
+    def started(self, cohort: str) -> int:
+        return start_attempt(self.conn, cohort, CONDITION_ID, "entry", NOW)
+
+    def charged(self, attempt_id: int) -> str:
+        row = self.conn.execute(
+            "SELECT cost_usd FROM research_attempts WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+        return str(row[0])
+
+    def test_interrupted_attempt_is_charged_at_its_cohorts_frozen_cap(self) -> None:
+        attempt = self.started(self.cohort("m1", "3.00"))
+        self.assertEqual(day_usage(self.conn, NOW, Decimal("1")).spent_usd, Decimal("3.00"))
+        recover_interrupted_attempts(self.conn, Decimal("1"), NOW + timedelta(minutes=1))
+        self.assertEqual(self.charged(attempt), "3.00")
+
+    def test_a_lower_frozen_cap_is_what_that_attempt_could_spend(self) -> None:
+        attempt = self.started(self.cohort("m1", "0.50"))
+        self.assertEqual(day_usage(self.conn, NOW, Decimal("3")).spent_usd, Decimal("0.50"))
+        recover_interrupted_attempts(self.conn, Decimal("3"), NOW + timedelta(minutes=1))
+        self.assertEqual(self.charged(attempt), "0.50")
+
+    def test_missing_or_unparseable_frozen_cap_charges_the_highest_known_cap(self) -> None:
+        for label, frozen in (("missing", None), ("garbage", "lots"), ("number", 2),
+                              ("negative", "-1"), ("nan", "NaN")):
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                attempt = self.started(self.cohort("m1", frozen))
+                self.cohort("m2", "4.00")  # a later cohort with a higher frozen cap
+                self.assertEqual(day_usage(self.conn, NOW, Decimal("1")).spent_usd,
+                                 Decimal("4.00"))
+                recover_interrupted_attempts(self.conn, Decimal("1"), NOW + timedelta(hours=1))
+                self.assertEqual(self.charged(attempt), "4.00")
+
+    def test_without_any_parseable_frozen_cap_the_current_cap_is_charged(self) -> None:
+        attempt = self.started(self.cohort("m1"))
+        recover_interrupted_attempts(self.conn, CAP, NOW + timedelta(minutes=1))
+        self.assertEqual(self.charged(attempt), "3.00")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ from decimal import Decimal
 from importlib.util import find_spec
 from unittest import mock
 
-from predict_agent.research.schema import OUTPUT_SCHEMA
+from predict_agent.research.schema import OUTPUT_SCHEMA, OutputError, parse_output
 from predict_agent.research.sdk import (
     ALLOWED_TOOLS,
     DENIED_TOOLS,
@@ -20,7 +20,7 @@ from predict_agent.research.sdk import (
     run_research,
     toolset_problem,
 )
-from tests.predict.fake_sdk import FakeSdk, ResultMessage, Script, ToolCall
+from tests.predict.fake_sdk import FakeSdk, ResultMessage, Script, ToolCall, fetch_page
 
 BLOCKED = ("kalshi.com", "polymarket.com")
 REQUEST = ResearchRequest(
@@ -117,7 +117,7 @@ class HookTests(unittest.TestCase):
             "https://www.internal-medicine.org/": True,
         }
         fake, outcome = run(Script(calls=[
-            ToolCall("WebFetch", {"url": url, "prompt": "p"}, "page") for url in urls
+            ToolCall("WebFetch", {"url": url, "prompt": "p"}, fetch_page(url)) for url in urls
         ]))
         decisions = [d["hookSpecificOutput"]["permissionDecision"] for d in fake.decisions]
         self.assertEqual(decisions, ["allow" if ok else "deny" for ok in urls.values()])
@@ -125,6 +125,69 @@ class HookTests(unittest.TestCase):
             outcome.fetched_urls,  # type: ignore[attr-defined]
             frozenset(url for url, ok in urls.items() if ok),
         )
+
+    def test_only_a_fetched_page_is_citable_evidence(self) -> None:
+        url = "https://www.reuters.com/a"
+        notice = ("REDIRECT DETECTED: The URL redirects to a location that was not fetched "
+                  "automatically.")
+        not_citable = {
+            "302 redirect notice": fetch_page(url, code=302, text=notice, size=0),
+            "302 notice with bytes": fetch_page(url, code=302, text=notice),
+            "503": fetch_page(url, code=503, text="HTTP 503 Service Unavailable", size=0),
+            "404 with a body": fetch_page(url, code=404, text="Not found"),
+            "200 with no bytes": fetch_page(url, size=0),
+            "string response": "The page says the bill passed.",
+            "no code": {"bytes": 10, "result": "page", "url": url},
+            "string code": {**fetch_page(url), "code": "200"},
+            "bool bytes": {**fetch_page(url), "bytes": True},
+            "none": None,
+        }
+        for label, response in not_citable.items():
+            with self.subTest(label):
+                fake = FakeSdk(Script(
+                    calls=[ToolCall("WebFetch", {"url": url, "prompt": "p"}, response)],
+                ))
+                # None as a response would be replaced by the fake's default page.
+                fake.script.calls[0].response = response
+                outcome = run_research(REQUEST, load=fake.module)
+                self.assertEqual(outcome.fetched_urls, frozenset())
+                results = [e for e in outcome.transcript if e["event"] == "result"]
+                self.assertEqual(len(results), 1)
+                self.assertIs(results[0]["admitted"], False)
+                self.assertEqual(results[0]["output"], response)
+        _, outcome = run(Script(calls=[ToolCall("WebFetch", {"url": url, "prompt": "p"},
+                                                fetch_page(url))]))
+        self.assertEqual(outcome.fetched_urls, frozenset({url}))  # type: ignore[attr-defined]
+        results = [e for e in outcome.transcript if e["event"] == "result"]  # type: ignore[attr-defined]
+        self.assertIs(results[0]["admitted"], True)
+
+    def test_unadmitted_fetch_fails_its_citation(self) -> None:
+        url = "https://www.reuters.com/a"
+        output = {
+            "abstain": False, "abstain_reason": None, "p_low": "0.55", "p_mid": "0.60",
+            "p_high": "0.70", "confidence": "medium", "base_rate": "0.30",
+            "rules_interpretation": "Resolves on the announcement.",
+            "evidence": [{"claim": "The bill passed.", "url": url}],
+        }
+        for code in (302, 503):
+            with self.subTest(code):
+                _, outcome = run(Script(
+                    calls=[ToolCall("WebFetch", {"url": url, "prompt": "p"},
+                                    fetch_page(url, code=code, text="notice", size=0))],
+                    result=ResultMessage("success", total_cost_usd=0.1,
+                                         structured_output=output),
+                ))
+                with self.assertRaises(OutputError) as raised:
+                    parse_output(outcome.structured_output,  # type: ignore[attr-defined]
+                                 outcome.fetched_urls)  # type: ignore[attr-defined]
+                self.assertEqual(raised.exception.code, "UNFETCHED_CITATION")
+        _, outcome = run(Script(
+            calls=[ToolCall("WebFetch", {"url": url, "prompt": "p"})],
+            result=ResultMessage("success", total_cost_usd=0.1, structured_output=output),
+        ))
+        parsed = parse_output(outcome.structured_output,  # type: ignore[attr-defined]
+                              outcome.fetched_urls)  # type: ignore[attr-defined]
+        self.assertEqual(parsed.evidence, (("The bill passed.", url),))
 
     def test_failed_tool_call_is_recorded_in_the_transcript(self) -> None:
         fake, outcome = run(Script(calls=[
@@ -282,6 +345,15 @@ class ResultTests(unittest.TestCase):
         _, outcome = run(Script(result=ResultMessage("success", total_cost_usd=None)))
         self.assertEqual(outcome.error, "NO_RESULT")  # type: ignore[attr-defined]
         self.assertIsNone(outcome.cost_usd)  # type: ignore[attr-defined]
+
+    def test_init_report_model_is_recorded_not_enforced(self) -> None:
+        _, outcome = run(Script(model="claude-opus-5-5-20260901"))
+        self.assertEqual(outcome.reported_model,  # type: ignore[attr-defined]
+                         "claude-opus-5-5-20260901")
+        self.assertIsNone(outcome.error)  # type: ignore[attr-defined]  # a mismatch is kept
+        _, outcome = run(Script(model=None))
+        self.assertIsNone(outcome.reported_model)  # type: ignore[attr-defined]
+        self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
 
     def test_sdk_exception_is_an_error_code_with_the_type_name_only(self) -> None:
         _, outcome = run(Script(raise_error=RuntimeError("secret token sk-123 leaked")))

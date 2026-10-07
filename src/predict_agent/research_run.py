@@ -3,11 +3,14 @@
 1. Open (or reuse) the cohort for the configured policy, prompt, model and research
    settings.
 2. Close attempts an earlier run left STARTED, charging the full per-forecast cap.
-3. Resume unfinished forecasts: take missing baselines while the window is open, mark the
-   rest NO_TIMELY_BASELINE, and decide whatever has a baseline.
-4. For each eligible market of the latest discovery run that this cohort has not forecast,
-   in order: check the day's budget and volume, open an attempt, run research (no price),
-   validate the output, record the forecast (or fail the attempt with its cost), then
+3. Resume unfinished forecasts: take missing baselines while the window is open; once it
+   has closed, attach the earliest pair of books already stored inside the window (a crash
+   between storing the books and attaching them loses nothing), and mark the rest
+   NO_TIMELY_BASELINE; decide whatever has a baseline.
+4. For each eligible market of the latest discovery run that this cohort has not forecast
+   and whose resolution has not started, in order: check the day's budget and volume, open
+   an attempt, run research (no price), validate the output, recheck that resolution has
+   not started meanwhile, record the forecast (or fail the attempt with its cost), then
    fetch both books immediately as the post-forecast baseline and decide every portfolio.
 
 The research runner is injected, so tests run with no network and no SDK."""
@@ -32,6 +35,7 @@ from .forecasts import (
     ForecastRecord,
     ResumeStep,
     attach_baseline,
+    baseline_deadline,
     fail_attempt,
     mark_no_timely_baseline,
     record_forecast,
@@ -47,6 +51,7 @@ from .research.exposure import scan
 from .research.prompt import SYSTEM_PROMPT, prompt_artifact, render_user_prompt, research_input
 from .research.schema import OUTPUT_SCHEMA, OutputError, parse_output
 from .research.sdk import ResearchOutcome, ResearchRequest
+from .resolution import OPEN_STATUSES
 from .util import canonical_json, parse_datetime
 
 ResearchRunner = Callable[[ResearchRequest], ResearchOutcome]
@@ -57,6 +62,10 @@ MAX_DISCOVERY_AGE = timedelta(hours=24)
 # remaining candidate (SDK_ERROR only when it repeats).
 SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
 SDK_ERROR_STREAK = 2
+MARKET_RESOLVED = "MARKET_RESOLVED"
+# The init report's model field is recorded, never enforced: its exact name and value are
+# unverified until the Plan 4 live smoke run.
+REPORTED_MODEL_NOTE = "model named by the session init report; unverified, not enforced"
 
 
 @dataclass
@@ -91,11 +100,30 @@ def cohort_identity(
     )
 
 
+def resolution_started(
+    conn: sqlite3.Connection, condition_id: str, as_of: datetime | None = None
+) -> bool:
+    """True when a stored resolution observation reports the market outside the open
+    statuses (proposed, disputed, resolved...): the notion paper trading uses to refuse a
+    trade. With `as_of`, only observations fetched at or before it count."""
+    for row in conn.execute(
+        "SELECT status, resolution_fetched_at FROM resolution_observations "
+        "WHERE condition_id = ?",
+        (condition_id,),
+    ):
+        if row["status"] in OPEN_STATUSES:
+            continue
+        if as_of is None or parse_datetime(row["resolution_fetched_at"]) <= as_of:
+            return True
+    return False
+
+
 def candidates(
     conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
 ) -> list[sqlite3.Row]:
-    """Markets of the latest completed discovery run that this cohort has not forecast and
-    that do not close within the policy's minimum time, in condition-id order. A market
+    """Markets of the latest completed discovery run that this cohort has not forecast,
+    whose resolution has not started (any stored observation, see `resolution_started`)
+    and that do not close within the policy's minimum time, in condition-id order. A market
     with MAX_FAILED_ENTRY_ATTEMPTS or more FAILED entry attempts for this cohort is left
     out; attempts closed as INTERRUPTED (a crash, not a verdict on the market) do not count."""
     run_id = latest_discovery_run(conn)
@@ -116,6 +144,8 @@ def candidates(
     horizon = now + timedelta(hours=min_hours_to_close)
     selected = []
     for row in rows:
+        if resolution_started(conn, row["condition_id"]):
+            continue
         end_date = json.loads(row["rules_json"]).get("end_date")
         if end_date and parse_datetime(end_date) >= horizon:
             selected.append(row)
@@ -176,11 +206,13 @@ def _string_leaves(value: object) -> list[str]:
     return []
 
 
-def _exposure_texts(outcome: ResearchOutcome) -> list[str]:
-    """Everything the model saw: its own text, the output, every tool result and every
-    tool error (the model reads a failed call's error text too). Denial reasons and tool
-    inputs are the model's or the hook's own words, not something it saw."""
-    texts = [outcome.final_text, *_string_leaves(outcome.structured_output)]
+def _exposure_texts(outcome: ResearchOutcome, user_prompt: str) -> list[str]:
+    """Everything the model saw: the rendered user prompt (market descriptions can quote
+    prices), its own text, the output, every tool result and every tool error (the model
+    reads a failed call's error text too). The fixed SYSTEM_PROMPT is left out: it names
+    prediction markets and odds only to forbid them. Denial reasons and tool inputs are the
+    model's or the hook's own words, not something it saw."""
+    texts = [user_prompt, outcome.final_text, *_string_leaves(outcome.structured_output)]
     for event in outcome.transcript:
         texts += _string_leaves(event.get("output")) + _string_leaves(event.get("error"))
     return texts
@@ -227,6 +259,13 @@ def research_market(
         record_refusal(conn, run_id, condition_id, "research", outcome.error, outcome.detail,
                        now_fn())
         return None, outcome.error
+    checked = now_fn()
+    if resolution_started(conn, condition_id, as_of=checked):
+        # Resolution started while the session ran: a forecast now could see the answer.
+        fail_attempt(conn, attempt_id, cost, MARKET_RESOLVED, checked)
+        record_refusal(conn, run_id, condition_id, "research", MARKET_RESOLVED,
+                       "a resolution observation arrived during research", now_fn())
+        return None, MARKET_RESOLVED
     try:
         parsed = parse_output(outcome.structured_output, outcome.fetched_urls)
     except OutputError as error:
@@ -250,12 +289,23 @@ def research_market(
         body={
             "evidence": [{"claim": claim, "url": url} for claim, url in parsed.evidence],
             "rules_interpretation": parsed.rules_interpretation,
-            "exposure_flags": list(scan(_exposure_texts(outcome))),
+            "exposure_flags": list(scan(_exposure_texts(outcome, user_prompt))),
         },
         research_input_hash=store_artifact(conn, "research_input", research_input(user_prompt),
                                            now),
         transcript_hash=store_artifact(
-            conn, "tool_transcript", canonical_json(list(outcome.transcript)), now
+            conn,
+            "tool_transcript",
+            canonical_json([
+                {
+                    "event": "session",
+                    "requested_model": research.model,
+                    "reported_model": outcome.reported_model,
+                    "note": REPORTED_MODEL_NOTE,
+                },
+                *outcome.transcript,
+            ]),
+            now,
         ),
         cost_usd=cost,
     )
@@ -276,6 +326,33 @@ def research_market(
         return None, "RECORD_FAILED"
 
 
+def stored_baseline(conn: sqlite3.Connection, forecast_id: int) -> tuple[int, int] | None:
+    """The earliest stored YES and NO snapshots of the forecast's market fetched inside its
+    baseline window (from the forecast commit to the deadline), whichever run stored them:
+    `attach_baseline` ties a baseline to the market, outcome and fetch time only."""
+    forecast = conn.execute(
+        "SELECT f.condition_id, f.created_at, c.baseline_window_seconds FROM forecasts f "
+        "JOIN cohorts c ON c.cohort_id = f.cohort_id WHERE f.forecast_id = ?",
+        (forecast_id,),
+    ).fetchone()
+    opened = parse_datetime(forecast["created_at"])
+    deadline = baseline_deadline(forecast)
+    earliest: dict[str, tuple[datetime, int]] = {}
+    for row in conn.execute(
+        "SELECT id, outcome, fetched_at FROM book_snapshots WHERE condition_id = ?",
+        (forecast["condition_id"],),
+    ):
+        fetched = parse_datetime(row["fetched_at"])
+        if not opened <= fetched <= deadline:
+            continue
+        key = (fetched, row["id"])
+        if row["outcome"] not in earliest or key < earliest[row["outcome"]]:
+            earliest[row["outcome"]] = key
+    if "YES" not in earliest or "NO" not in earliest:
+        return None
+    return earliest["YES"][1], earliest["NO"][1]
+
+
 def resume_forecasts(
     conn: sqlite3.Connection,
     client: JsonClient,
@@ -284,7 +361,8 @@ def resume_forecasts(
     now_fn: Callable[[], datetime],
 ) -> None:
     """Every cohort's forecasts still waiting for a baseline: take it while the window is
-    open, otherwise record NO_TIMELY_BASELINE."""
+    open; once it has closed, attach books already stored inside the window, otherwise
+    record NO_TIMELY_BASELINE."""
     cohorts = [row["cohort_id"] for row in conn.execute("SELECT cohort_id FROM cohorts")]
     for cohort_id in cohorts:
         for forecast_id in unfinished_forecasts(conn, cohort_id):
@@ -294,6 +372,17 @@ def resume_forecasts(
                     summary.baselines += 1
                     summary.traded += trade_ready(conn, now_fn()).traded
             elif step is ResumeStep.BASELINE_EXPIRED:
+                pair = stored_baseline(conn, forecast_id)
+                if pair is not None:
+                    try:
+                        attach_baseline(conn, forecast_id, pair[0], pair[1], now_fn())
+                    except ForecastError as error:
+                        record_refusal(conn, run_id, None, "baseline", "BASELINE_REFUSED",
+                                       str(error), now_fn())
+                    else:
+                        summary.baselines += 1
+                        summary.traded += trade_ready(conn, now_fn()).traded
+                        continue
                 mark_no_timely_baseline(conn, forecast_id, now_fn())
                 summary.no_timely_baseline += 1
 

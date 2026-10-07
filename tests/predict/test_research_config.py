@@ -84,6 +84,21 @@ class ParseResearchTests(unittest.TestCase):
             with self.subTest(label), self.assertRaises(ConfigError):
                 parse_research(section)
 
+    def test_model_must_be_a_pinned_versioned_id(self) -> None:
+        def section(model: object) -> dict[str, Any]:
+            raw = copy.deepcopy(example_section())
+            raw["model"] = model
+            return raw
+
+        for model in ("claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-5"):
+            with self.subTest(model):
+                self.assertEqual(parse_research(section(model)).model, model)
+        for alias in ("opus", "sonnet", "haiku", "claude-opus-latest", "claude-opus-5-latest",
+                      "claude-sonnet", "Claude-opus-5-5", "claude-opus-5-5 ", "claude-opus-5.5",
+                      "anthropic/claude-opus-5-5", "", 5):
+            with self.subTest(alias), self.assertRaisesRegex(ConfigError, "research.model"):
+                parse_research(section(alias))
+
     def test_blocked_host_covers_subdomains_only(self) -> None:
         blocked = ("polymarket.com",)
         self.assertTrue(blocked_host("polymarket.com", blocked))
