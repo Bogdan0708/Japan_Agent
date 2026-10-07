@@ -11,4 +11,5 @@ preserves the fuller findings and sources.
 - [data-and-architecture.md](data-and-architecture.md) — Japanese market data sources, agent frameworks, guardrails, scheduling
 - [audit-2026-08-28.md](audit-2026-08-28.md) — audit of `985bbc0` and the resolutions claimed in `25b0891`
 - [post-remediation-audit-2026-08-28.md](post-remediation-audit-2026-08-28.md) — verification of `25b0891`, including focused false-green probes and remaining blockers
+- [predict-plan4-final-review-2026-10-06.md](predict-plan4-final-review-2026-10-06.md) — independent final review of predict_agent Plan 4 (research layer, PR #4): findings, fixes, checks found sound
 - [sources.md](sources.md) — dated primary-source register and the claims each source supports

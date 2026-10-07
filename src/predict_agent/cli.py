@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from .cohorts import code_version
 from .collect import (
     discover,
     finish_run,
@@ -24,6 +27,9 @@ from .invariants import verify_ledger
 from .paper import trade_ready
 from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
+from .research.config import load_research_config
+from .research.sdk import ResearchUnavailable, load_sdk, run_research
+from .research_run import ResearchRunner, ResearchSummary, run_research_day
 from .settlement import settle_open_tickets
 from .util import utc_now
 
@@ -39,6 +45,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("resolve", help="poll resolution state for known markets")
     sub.add_parser("settle", help="settle open paper tickets from stored resolutions (offline)")
     sub.add_parser("trade", help="decide forecasts with timely baselines; paper only (offline)")
+    sub.add_parser("research", help="forecast eligible markets with Claude (no prices), then trade")
     report = sub.add_parser("report", help="write the shortlist report")
     which = report.add_mutually_exclusive_group(required=True)
     which.add_argument("--run")
@@ -80,6 +87,7 @@ def main(
     client: JsonClient | None = None,
     root: Path | None = None,
     now_fn: Callable[[], datetime] = utc_now,
+    runner: ResearchRunner | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     settings = Settings.from_root((root or Path.cwd()).resolve())
@@ -91,9 +99,16 @@ def main(
     if args.command == "doctor":
         try:
             load_policy_config(settings.policy_path)
+            research = load_research_config(settings.policy_path)
         except ConfigError as error:
             print(f"predict-agent: {error}", file=sys.stderr)
             return 2
+        try:
+            load_sdk()
+            sdk_state = "installed"
+        except ResearchUnavailable:
+            sdk_state = "not installed (research disabled)"
+        print(f"research: model {research.model}; Claude Agent SDK {sdk_state}")
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)
@@ -133,6 +148,8 @@ def main(
             print(f"pending ticket {item.ticket_id} {item.condition_id}: {item.reason} ({since})")
         return 0
     http = client or JsonClient()
+    if args.command == "research":
+        return _research(settings, http, policy_hash, runner, now_fn)
     if args.command == "report":
         run_id = args.run or _latest_discovery_run(settings.database_path)
         if run_id is None:
@@ -161,6 +178,69 @@ def main(
     if code == 0 and args.command == "run-data":
         print(_write_report(settings, settings.database_path, run_id))
     return code
+
+
+def _research(
+    settings: Settings,
+    http: JsonClient,
+    config_hash: str,
+    runner: ResearchRunner | None,
+    now_fn: Callable[[], datetime],
+) -> int:
+    try:
+        policy = load_policy_config(settings.policy_path)
+        research = load_research_config(settings.policy_path)
+    except ConfigError as error:
+        print(f"predict-agent: {error}", file=sys.stderr)
+        return 2
+    if runner is None:
+        try:
+            load_sdk()
+        except ResearchUnavailable as error:
+            print(f"predict-agent: {error}", file=sys.stderr)
+            return 2
+        runner = run_research
+    # One research run at a time: a second run would recover the first one's live attempts.
+    lock_path = settings.database_path.with_name(settings.database_path.name + ".research.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:  # BlockingIOError is a subclass
+            print("predict-agent: another research run is in progress", file=sys.stderr)
+            return 2
+        conn = connect(settings.database_path)
+        try:
+            summary = run_research_day(
+                conn,
+                http,
+                runner,
+                policy=policy,
+                research=research,
+                config_hash=config_hash,
+                code_version=code_version(settings.root),
+                now_fn=now_fn,
+            )
+        finally:
+            conn.close()
+    finally:
+        os.close(lock_fd)
+    print(_research_line(summary))
+    return 0
+
+
+def _research_line(summary: ResearchSummary) -> str:
+    def counts(counter: dict[str, int]) -> str:
+        return ", ".join(f"{code} {n}" for code, n in sorted(counter.items())) or "none"
+
+    return (
+        f"cohort {summary.cohort_id[:12]}; recovered attempts {summary.recovered}; "
+        f"forecasts {summary.forecasts} (abstained {summary.abstentions}); "
+        f"failed: {counts(summary.failed)}; skipped: {counts(summary.skipped)}; "
+        f"baselines {summary.baselines}; no timely baseline {summary.no_timely_baseline}; "
+        f"traded {summary.traded}"
+    )
 
 
 def _run_steps(
