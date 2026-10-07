@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import re
 import unittest
 from decimal import Decimal
 from typing import Any
 
 from predict_agent.research.exposure import scan
-from predict_agent.research.schema import OUTPUT_SCHEMA, OutputError, parse_output
+from predict_agent.research.schema import (
+    DECIMAL_PATTERN,
+    OUTPUT_SCHEMA,
+    OutputError,
+    parse_output,
+)
 
 FETCHED = frozenset({"https://www.reuters.com/a", "https://apnews.com/b"})
 
@@ -30,6 +36,18 @@ class SchemaTests(unittest.TestCase):
     def test_schema_requires_every_property(self) -> None:
         self.assertEqual(set(OUTPUT_SCHEMA["required"]), set(OUTPUT_SCHEMA["properties"]))
         self.assertIs(OUTPUT_SCHEMA["additionalProperties"], False)
+
+    def test_probability_fields_carry_the_decimal_pattern(self) -> None:
+        for key in ("p_low", "p_mid", "p_high", "base_rate"):
+            self.assertEqual(OUTPUT_SCHEMA["properties"][key]["pattern"], DECIMAL_PATTERN, key)
+            self.assertEqual(OUTPUT_SCHEMA["properties"][key]["type"], ["string", "null"], key)
+
+    def test_decimal_pattern_accepts_decimals_and_rejects_prose(self) -> None:
+        pattern = re.compile(DECIMAL_PATTERN)
+        for good in ("0.07", "0", "1", "0.5", "1.0"):
+            self.assertIsNotNone(pattern.search(good), good)
+        for bad in ("5-10%", "0.07 (approx)", ".5", "1.5", "07"):
+            self.assertIsNone(pattern.search(bad), bad)
 
     def test_valid_forecast_parses_to_exact_decimals(self) -> None:
         parsed = parse_output(forecast(), FETCHED)
