@@ -12,11 +12,15 @@ from collections.abc import Callable
 from datetime import timedelta
 from decimal import Decimal
 
+from .artifacts import load_artifact
 from .cash import available_cash, cash_entry_hash, parse_money
 from .cohorts import portfolio_id_for
 from .db import GENESIS_HASH, SCHEMA
+from .fills import level_fee
 from .forecasts import forecast_hash
+from .gamma import fee_rate
 from .ledger_schema import LEDGER_SCHEMA
+from .policy_params import policy_from_artifact
 from .settlement import SETTLEABLE_OUTCOMES, payout_per_share
 from .tickets import ticket_hash
 from .util import parse_datetime, sha256_json, sha256_text
@@ -262,6 +266,58 @@ def _settlement_problems(
     return problems
 
 
+def _fill_problems(conn: sqlite3.Connection, ticket: sqlite3.Row) -> list[str]:
+    """A ticket's fills must come from its own recorded book: existing levels, no more than
+    their recorded size, per-level fees from the snapshot's schedule, within the policy's
+    slippage limit, decided while the book was fresh (spec §5: never fabricate fills)."""
+    label = f"ticket {ticket['ticket_id']}"
+    snapshot = conn.execute(
+        "SELECT * FROM book_snapshots WHERE id = ?", (ticket["snapshot_id"],)
+    ).fetchone()
+    if snapshot is None:
+        return [f"{label}: its snapshot is missing"]
+    record = json.loads(snapshot["record_json"])
+    depth = {Decimal(price): Decimal(size) for price, size in record["asks"]}
+    fills = [
+        (Decimal(price), Decimal(shares)) for price, shares in json.loads(ticket["fills_json"])
+    ]
+    problems: list[str] = []
+    prices = [price for price, _ in fills]
+    if (
+        not fills
+        or len(set(prices)) != len(prices)
+        or any(
+            price not in depth or shares <= 0 or shares > depth[price] for price, shares in fills
+        )
+    ):
+        problems.append(f"{label}: fills are not within the recorded book")
+    rate = Decimal("0")
+    if snapshot["fees_enabled"]:
+        schedule = snapshot["fee_schedule_json"]
+        found = fee_rate(json.loads(schedule) if schedule else None)
+        if found is None:
+            return [*problems, f"{label}: snapshot has fees but no fee rate"]
+        rate = found
+    fee = sum((level_fee(shares, price, rate) for price, shares in fills), Decimal("0"))
+    notional = sum((price * shares for price, shares in fills), Decimal("0"))
+    if parse_money(ticket["fee"]) != fee:
+        problems.append(f"{label}: fee differs from the snapshot's per-level fee")
+    if (
+        parse_money(ticket["cost_total"]) != notional + parse_money(ticket["fee"])
+        or parse_money(ticket["shares"]) != sum((s for _, s in fills), Decimal("0"))
+    ):
+        problems.append(f"{label}: shares or cost do not match its fills")
+    params = policy_from_artifact(load_artifact(conn, ticket["policy_hash"])[1])
+    if depth and fills:
+        limit = min(depth) * (Decimal("1") + params.max_slippage)
+        if max(prices) > limit:
+            problems.append(f"{label}: fills beyond the policy's slippage limit")
+    age = parse_datetime(ticket["created_at"]) - parse_datetime(snapshot["fetched_at"])
+    if not timedelta(0) <= age <= timedelta(seconds=params.max_book_age_seconds):
+        problems.append(f"{label}: decided on a book {age} old")
+    return problems
+
+
 def _decision_problems(conn: sqlite3.Connection) -> list[str]:
     problems: list[str] = []
     for row in conn.execute(
@@ -347,6 +403,13 @@ def _verify(conn: sqlite3.Connection) -> list[str]:
         "ticket",
         "ticket_id",
         _ticket_problems,
+    )
+    problems += _each(
+        conn,
+        "SELECT * FROM paper_tickets ORDER BY ticket_id",
+        "ticket",
+        "ticket_id",
+        _fill_problems,
     )
     problems += _guarded("decisions", lambda: _decision_problems(conn))
     return problems

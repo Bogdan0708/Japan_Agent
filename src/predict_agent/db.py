@@ -234,11 +234,16 @@ def append_journal(
 
 
 def verify_journal(conn: sqlite3.Connection) -> bool:
+    """True when the chain is intact. An unreadable entry (e.g. payload that is not JSON)
+    is a broken chain, never an exception."""
     prev_hash = GENESIS_HASH
     for row in conn.execute("SELECT * FROM journal ORDER BY seq"):
         if row["prev_hash"] != prev_hash:
             return False
-        expected = _entry_hash(row["at"], row["kind"], row["payload_json"], row["prev_hash"])
+        try:
+            expected = _entry_hash(row["at"], row["kind"], row["payload_json"], row["prev_hash"])
+        except (ValueError, TypeError):
+            return False
         if expected != row["entry_hash"]:
             return False
         prev_hash = row["entry_hash"]

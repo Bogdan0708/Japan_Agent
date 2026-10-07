@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from predict_agent.artifacts import store_artifact
@@ -17,12 +19,24 @@ from predict_agent.forecasts import (
     record_forecast,
     start_attempt,
 )
+from predict_agent.policy_params import parse_policy, variant_policies
 from predict_agent.tickets import Fill, TicketDraft
 from predict_agent.util import canonical_json, isoformat, sha256_json
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN
 
-PRIMARY_POLICY = '{"min_edge": "0.05", "price": "bounds"}'
-SHADOW_POLICY = '{"min_edge": "0.05", "price": "p_mid"}'
+_POLICIES = variant_policies(
+    parse_policy(
+        json.loads(
+            (Path(__file__).resolve().parents[2] / "config" / "predict-policy.example.json")
+            .read_text(encoding="utf-8")
+        )["policy"],
+        "bounds",
+    )
+)
+PRIMARY_POLICY = _POLICIES["primary"]
+SHADOW_POLICY = _POLICIES["shadow_mid"]
+# Recorded asks deep enough for every draft the ledger tests open.
+BOOK_RECORD_ASKS = [["0.40", "1000"], ["0.41", "1000"]]
 WINDOW_SECONDS = 1800
 
 
@@ -61,18 +75,40 @@ def seed_snapshot(
     outcome: str,
     fetched_at: datetime,
     condition_id: str = CONDITION_ID,
+    *,
+    asks: list[tuple[str, str]] | None = None,
+    min_order_size: str = "0",
+    tick_size: str = "0.01",
+    fee_schedule: dict[str, Any] | None = None,
 ) -> int:
+    """A stored snapshot whose record carries real ask levels, best-first as Plan 1 stores
+    them (default: deep enough for every draft the ledger tests open)."""
     token = YES_TOKEN if outcome == "YES" else NO_TOKEN
+    levels = [list(level) for level in asks] if asks is not None else BOOK_RECORD_ASKS
+    record = {
+        "condition_id": condition_id,
+        "token_id": token,
+        "observed_at": isoformat(fetched_at),
+        "fetched_at": isoformat(fetched_at),
+        "book_hash": "h",
+        "bids": [["0.01", "100"]],
+        "asks": sorted(levels, key=lambda level: Decimal(level[0])),
+        "tick_size": tick_size,
+        "min_order_size": min_order_size,
+    }
     cursor = conn.execute(
         "INSERT INTO book_snapshots (run_id, condition_id, token_id, source_run_id, outcome, "
         "observed_at, fetched_at, record_json, fees_enabled, fee_schedule_json, snapshot_hash) "
-        "VALUES ('r', ?, ?, 'r', ?, ?, ?, '{}', 0, NULL, ?)",
+        "VALUES ('r', ?, ?, 'r', ?, ?, ?, ?, ?, ?, ?)",
         (
             condition_id,
             token,
             outcome,
             isoformat(fetched_at),
             isoformat(fetched_at),
+            canonical_json(record),
+            int(fee_schedule is not None),
+            canonical_json(fee_schedule) if fee_schedule is not None else None,
             uuid.uuid4().hex,
         ),
     )

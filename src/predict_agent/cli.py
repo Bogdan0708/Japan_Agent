@@ -21,6 +21,8 @@ from .db import connect, record_refusal, verify_journal
 from .gamma import ParseError
 from .http import FetchError, JsonClient
 from .invariants import verify_ledger
+from .paper import trade_ready
+from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
 from .settlement import settle_open_tickets
 from .util import utc_now
@@ -36,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("snapshot", help="snapshot books for the latest discovery run")
     sub.add_parser("resolve", help="poll resolution state for known markets")
     sub.add_parser("settle", help="settle open paper tickets from stored resolutions (offline)")
+    sub.add_parser("trade", help="decide forecasts with timely baselines; paper only (offline)")
     report = sub.add_parser("report", help="write the shortlist report")
     which = report.add_mutually_exclusive_group(required=True)
     which.add_argument("--run")
@@ -86,6 +89,11 @@ def main(
         print(f"predict-agent: {error}", file=sys.stderr)
         return 2
     if args.command == "doctor":
+        try:
+            load_policy_config(settings.policy_path)
+        except ConfigError as error:
+            print(f"predict-agent: {error}", file=sys.stderr)
+            return 2
         conn = connect(settings.database_path)
         try:
             journal_ok = verify_journal(conn)
@@ -97,6 +105,20 @@ def main(
             print(f"ledger: {problem}")
         print(f"ledger: {'ok' if not problems else f'{len(problems)} problem(s)'}")
         return 0 if journal_ok and not problems else 3
+    if args.command == "trade":
+        conn = connect(settings.database_path)
+        try:
+            trades = trade_ready(conn, now_fn)
+        finally:
+            conn.close()
+        reasons = ", ".join(f"{code} {count}" for code, count in sorted(trades.refused.items()))
+        refused = sum(trades.refused.values())
+        print(
+            f"traded {trades.traded}; refused {refused}"
+            + (f" ({reasons})" if reasons else "")
+            + f"; waiting {trades.waiting}"
+        )
+        return 0
     if args.command == "settle":
         now = now_fn()
         conn = connect(settings.database_path)

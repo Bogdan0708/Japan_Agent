@@ -57,7 +57,7 @@ class InvariantTests(unittest.TestCase):
                 self.forecast,
                 yes,
                 fills=(Fill(Decimal("0.40"), Decimal("10")),),
-                fee=Decimal("0.02"),
+                fee=Decimal("0"),  # the snapshot is fee-free
             ),
             LATER,
         )
@@ -267,6 +267,13 @@ class InvariantTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("settled 0; pending 2", output)
         self.assertIn("AWAITING_CONFIRMATION (resolved 10 days, 0:00:00 ago)", output)
+
+    def test_doctor_reports_an_unreadable_journal_as_broken(self) -> None:
+        self.conn.execute("DROP TRIGGER journal_no_update")
+        self.conn.execute("UPDATE journal SET payload_json = 'not json' WHERE seq = 1")
+        code, output = self.run_cli(["doctor"])
+        self.assertEqual(code, 3, output)
+        self.assertIn("journal chain BROKEN", output)
 
     def test_doctor_fails_on_ledger_problem(self) -> None:
         code, output = self.run_cli(["doctor"])
