@@ -117,7 +117,7 @@ def parse_policy(raw: object, probability: str, label: str = "policy") -> Policy
     if not Decimal("0") <= max_slippage < Decimal("1"):
         raise ConfigError(f"{label}.max_slippage must be in [0, 1)")
     confidence = raw["min_confidence"]
-    if confidence not in CONFIDENCE_RANK:
+    if not isinstance(confidence, str) or confidence not in CONFIDENCE_RANK:
         raise ConfigError(f"{label}.min_confidence must be one of {list(CONFIDENCE_RANK)}")
     return PolicyParams(
         probability=probability,
