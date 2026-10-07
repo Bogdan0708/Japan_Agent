@@ -194,6 +194,29 @@ class TradeTests(PaperTestCase):
         self.assertIsNotNone(result.ticket_id)
 
 
+    def test_a_concurrent_decision_is_skipped_not_raised(self) -> None:
+        forecast = seed_ready_forecast(self.conn, self.cohort, self.rules_hash)
+        first = decide_portfolio(self.conn, self.primary, forecast, DECIDE_AT)
+        self.assertIsNotNone(first.ticket_id)
+        # A second process read the same undecided list before the first one committed.
+        second = decide_portfolio(self.conn, self.primary, forecast, DECIDE_AT)
+        self.assertTrue(second.skipped)
+        self.assertIsNone(second.ticket_id)
+        with mock.patch(
+            "predict_agent.paper.undecided_portfolios",
+            return_value=[self.primary, self.shadow],
+        ):
+            summary = trade_ready(self.conn, DECIDE_AT)
+        self.assertEqual((summary.traded, summary.refused), (1, {}))
+        rows = self.conn.execute(
+            "SELECT portfolio_id FROM decisions WHERE forecast_id = ?", (forecast,)
+        ).fetchall()
+        self.assertEqual(sorted(r["portfolio_id"] for r in rows),
+                         sorted([self.primary, self.shadow]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM paper_tickets").fetchone()[0], 2)
+        self.assertEqual(verify_ledger(self.conn), [])
+
+
 class PortfolioStateTests(PaperTestCase):
     def test_losses_shrink_equity_and_the_next_size(self) -> None:
         seed_ready_forecast(self.conn, self.cohort, self.rules_hash)

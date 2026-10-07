@@ -36,6 +36,7 @@ class DecisionResult:
     ticket_id: int | None
     reason: str | None  # refusal code, None when traded
     detail: str
+    skipped: bool = False  # already decided by a concurrent run: nothing written
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,14 @@ def decide_portfolio(
         ).fetchone()
         if portfolio is None:
             raise LedgerError(f"unknown portfolio {portfolio_id[:12]}")
+        if conn.execute(
+            "SELECT 1 FROM decisions WHERE portfolio_id = ? AND forecast_id = ?",
+            (portfolio_id, forecast_id),
+        ).fetchone() is not None:
+            # Another `trade` decided it after our caller listed it undecided; the
+            # transaction writes nothing.
+            detail = "already decided by a concurrent run"
+            return DecisionResult(portfolio_id, forecast_id, None, None, detail, skipped=True)
         if portfolio["status"] != "ACTIVE":
             detail = "cohort closed before this forecast was decided"
             record_refusal_locked(conn, portfolio_id, forecast_id, COHORT_CLOSED, now, detail)
@@ -235,6 +244,8 @@ def trade_ready(conn: sqlite3.Connection, now: datetime) -> TradeSummary:
                 continue
             for portfolio_id in undecided_portfolios(conn, forecast_id):
                 result = decide_portfolio(conn, portfolio_id, forecast_id, now)
+                if result.skipped:
+                    continue
                 if result.ticket_id is not None:
                     traded += 1
                 else:
