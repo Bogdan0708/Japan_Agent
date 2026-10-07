@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -179,9 +180,15 @@ def _policy(conn: sqlite3.Connection, policy_hash: str) -> PolicyParams:
 
 
 def decide_portfolio(
-    conn: sqlite3.Connection, portfolio_id: str, forecast_id: int, now: datetime
+    conn: sqlite3.Connection,
+    portfolio_id: str,
+    forecast_id: int,
+    now_fn: Callable[[], datetime],
 ) -> DecisionResult:
+    """The clock is read once the write lock is held, so time spent waiting for the lock
+    counts toward the book's age; that one reading is the decision time."""
     with transaction(conn):
+        now = now_fn()
         portfolio = conn.execute(
             "SELECT p.policy_hash, c.status FROM portfolios p "
             "JOIN cohorts c ON c.cohort_id = p.cohort_id WHERE p.portfolio_id = ?",
@@ -229,7 +236,7 @@ def decide_portfolio(
         return DecisionResult(portfolio_id, forecast_id, ticket_id, None, detail)
 
 
-def trade_ready(conn: sqlite3.Connection, now: datetime) -> TradeSummary:
+def trade_ready(conn: sqlite3.Connection, now_fn: Callable[[], datetime]) -> TradeSummary:
     """Decide every entry forecast whose baseline is attached, in every cohort (a closed
     cohort's forecasts are refused COHORT_CLOSED). Safe to rerun: decided portfolios are
     skipped."""
@@ -239,11 +246,11 @@ def trade_ready(conn: sqlite3.Connection, now: datetime) -> TradeSummary:
     cohorts = [row["cohort_id"] for row in conn.execute("SELECT cohort_id FROM cohorts")]
     for cohort_id in cohorts:
         for forecast_id in unfinished_forecasts(conn, cohort_id):
-            if resume_step(conn, forecast_id, now) is not ResumeStep.NEEDS_DECISION:
+            if resume_step(conn, forecast_id, now_fn()) is not ResumeStep.NEEDS_DECISION:
                 waiting += 1
                 continue
             for portfolio_id in undecided_portfolios(conn, forecast_id):
-                result = decide_portfolio(conn, portfolio_id, forecast_id, now)
+                result = decide_portfolio(conn, portfolio_id, forecast_id, now_fn)
                 if result.skipped:
                     continue
                 if result.ticket_id is not None:

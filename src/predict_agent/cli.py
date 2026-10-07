@@ -108,7 +108,7 @@ def main(
     if args.command == "trade":
         conn = connect(settings.database_path)
         try:
-            trades = trade_ready(conn, now_fn())
+            trades = trade_ready(conn, now_fn)
         finally:
             conn.close()
         reasons = ", ".join(f"{code} {count}" for code, count in sorted(trades.refused.items()))
