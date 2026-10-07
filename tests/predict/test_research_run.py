@@ -34,7 +34,7 @@ from predict_agent.research_run import (
     cohort_identity,
     run_research_day,
 )
-from predict_agent.util import parse_datetime
+from predict_agent.util import canonical_json, parse_datetime
 from tests.predict.fakes import RoutedOpener
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN, clob_book
 from tests.predict.ledger_fixtures import seed_observation, seed_snapshot
@@ -240,8 +240,10 @@ class FailureTests(ResearchRunTestCase):
         self.run_day(runner, book_queue=[])
         refusal = self.conn.execute(
             "SELECT reason_code, detail FROM refusals WHERE stage = 'research'").fetchone()
+        digest = self.scalar("SELECT artifact_hash FROM artifacts WHERE kind = 'tool_transcript'")
         self.assertEqual(tuple(refusal),
-                         ("TOOLSET_MISMATCH", "unexpected tools ['Bash'], missing tools []"))
+                         ("TOOLSET_MISMATCH", "unexpected tools ['Bash'], missing tools [] "
+                          f"[transcript {digest}]"))
 
     def test_unknown_cost_is_charged_at_the_per_forecast_cap(self) -> None:
         self.run_day(FakeRunner(outcome(error="SDK_ERROR", cost_usd=None)), book_queue=[])
@@ -478,6 +480,44 @@ class FrozenCapRecoveryTests(ResearchRunTestCase):
         self.assertEqual(charged, "3")
         self.assertEqual(runner.requests, [])  # the day's $3 is spent: no new paid call
         self.assertEqual((summary.forecasts, dict(summary.skipped)), (0, {"BUDGET": 1}))
+
+
+class FailureTranscriptTests(ResearchRunTestCase):
+    def assert_transcript_kept(self, expected_code: str) -> None:
+        refusal = self.conn.execute(
+            "SELECT reason_code, detail FROM refusals WHERE stage = 'research'").fetchone()
+        self.assertEqual(refusal["reason_code"], expected_code)
+        digest = self.scalar("SELECT artifact_hash FROM artifacts WHERE kind = 'tool_transcript'")
+        self.assertTrue(refusal["detail"].endswith(f" [transcript {digest}]"), refusal["detail"])
+        content = self.scalar("SELECT content FROM artifacts WHERE kind = 'tool_transcript'")
+        events = json.loads(content)
+        self.assertEqual(content, canonical_json(events))
+        self.assertEqual(events[0]["event"], "session")
+        self.assertEqual(events[0]["requested_model"], RESEARCH.model)
+        self.assertEqual(events[1:], list(outcome().transcript))
+        self.assertEqual(verify_ledger(self.conn), [])
+
+    def test_schema_invalid_attempt_keeps_its_transcript(self) -> None:
+        runner = FakeRunner(outcome(structured_output=forecast_output(base_rate="5-10%")))
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(dict(summary.failed), {"SCHEMA_INVALID": 1})
+        self.assert_transcript_kept("SCHEMA_INVALID")
+
+    def test_runner_error_attempt_keeps_its_transcript(self) -> None:
+        runner = FakeRunner(outcome(error="MAX_BUDGET", cost_usd=Decimal("3.00"),
+                                    detail="budget hit", structured_output=None))
+        self.run_day(runner, book_queue=[])
+        self.assert_transcript_kept("MAX_BUDGET")
+        detail = self.scalar("SELECT detail FROM refusals WHERE stage = 'research'")
+        self.assertTrue(detail.startswith("budget hit [transcript "))
+
+    def test_market_resolved_attempt_keeps_its_transcript(self) -> None:
+        def resolving(request: ResearchRequest) -> ResearchOutcome:
+            seed_observation(self.conn, "YES", fetched_at=NOW)
+            return outcome()
+
+        self.run_day(resolving, book_queue=[])  # type: ignore[arg-type]
+        self.assert_transcript_kept("MARKET_RESOLVED")
 
 
 class ResolvedMarketTests(ResearchRunTestCase):
