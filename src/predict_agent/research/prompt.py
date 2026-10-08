@@ -24,9 +24,11 @@ your own.
 could not say what resolves YES, abstain and say why.
 - Every evidence item must cite a URL you actually opened with WebFetch in this session.
 - Give a base rate: how often comparable situations resolved YES, from reference-class \
-evidence, before considering the specifics.
+evidence, before considering the specifics. Report it as a single decimal string (for \
+example "0.07"); put any explanation in rules_interpretation.
 
-Report three probabilities as decimal strings between "0.01" and "0.99": p_low and \
+Report three probabilities as plain decimal strings between "0.01" and "0.99", with no \
+words or percent signs: p_low and \
 p_high are the lowest and highest probability you would still find defensible given the \
 evidence, and p_mid is your best estimate, with p_low <= p_mid <= p_high."""
 

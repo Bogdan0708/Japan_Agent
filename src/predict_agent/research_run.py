@@ -23,13 +23,14 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from .artifacts import store_artifact
 from .budget import INTERRUPTED, budget_refusal, day_usage, recover_interrupted_attempts
 from .cash import LedgerError
 from .cohorts import CohortIdentity, ensure_cohort
 from .collect import finish_run, snapshot_book, start_run
-from .db import record_refusal
+from .db import record_refusal, transaction
 from .forecasts import (
     ForecastError,
     ForecastRecord,
@@ -37,6 +38,7 @@ from .forecasts import (
     attach_baseline,
     baseline_deadline,
     fail_attempt,
+    fail_attempt_locked,
     mark_no_timely_baseline,
     record_forecast,
     resume_step,
@@ -218,6 +220,42 @@ def _exposure_texts(outcome: ResearchOutcome, user_prompt: str) -> list[str]:
     return texts
 
 
+def _transcript_content(research: ResearchConfig, outcome: ResearchOutcome) -> str:
+    return canonical_json([
+        {
+            "event": "session",
+            "requested_model": research.model,
+            "reported_model": outcome.reported_model,
+            "note": REPORTED_MODEL_NOTE,
+        },
+        *outcome.transcript,
+    ])
+
+
+def _refuse_with_transcript(
+    conn: sqlite3.Connection,
+    run_id: str,
+    condition_id: str,
+    attempt_id: int,
+    cost: Decimal,
+    failed_at: datetime,
+    code: str,
+    detail: str,
+    research: ResearchConfig,
+    outcome: ResearchOutcome,
+    now_fn: Callable[[], datetime],
+) -> None:
+    """Close the attempt as failed, record the research refusal and keep the session's
+    transcript so the failure can be audited. All three commit together (if any write
+    fails, the attempt stays STARTED for recovery); the detail ends with the hash."""
+    with transaction(conn):
+        fail_attempt_locked(conn, attempt_id, cost, code, failed_at)
+        digest = store_artifact(conn, "tool_transcript", _transcript_content(research, outcome),
+                                now_fn())
+        record_refusal(conn, run_id, condition_id, "research", code,
+                       f"{detail} [transcript {digest}]", now_fn())
+
+
 def research_market(
     conn: sqlite3.Connection,
     runner: ResearchRunner,
@@ -255,22 +293,22 @@ def research_market(
     cost = outcome.cost_usd if outcome.cost_usd is not None else research.per_forecast_usd
     condition_id = row["condition_id"]
     if outcome.error is not None:
-        fail_attempt(conn, attempt_id, cost, outcome.error, now_fn())
-        record_refusal(conn, run_id, condition_id, "research", outcome.error, outcome.detail,
-                       now_fn())
+        _refuse_with_transcript(conn, run_id, condition_id, attempt_id, cost, now_fn(),
+                                outcome.error, outcome.detail, research, outcome, now_fn)
         return None, outcome.error
     checked = now_fn()
     if resolution_started(conn, condition_id, as_of=checked):
         # Resolution started while the session ran: a forecast now could see the answer.
-        fail_attempt(conn, attempt_id, cost, MARKET_RESOLVED, checked)
-        record_refusal(conn, run_id, condition_id, "research", MARKET_RESOLVED,
-                       "a resolution observation arrived during research", now_fn())
+        _refuse_with_transcript(conn, run_id, condition_id, attempt_id, cost, checked,
+                                MARKET_RESOLVED,
+                                "a resolution observation arrived during research", research,
+                                outcome, now_fn)
         return None, MARKET_RESOLVED
     try:
         parsed = parse_output(outcome.structured_output, outcome.fetched_urls)
     except OutputError as error:
-        fail_attempt(conn, attempt_id, cost, error.code, now_fn())
-        record_refusal(conn, run_id, condition_id, "research", error.code, str(error), now_fn())
+        _refuse_with_transcript(conn, run_id, condition_id, attempt_id, cost, now_fn(),
+                                error.code, str(error), research, outcome, now_fn)
         return None, error.code
     now = now_fn()
     record = ForecastRecord(
@@ -293,20 +331,8 @@ def research_market(
         },
         research_input_hash=store_artifact(conn, "research_input", research_input(user_prompt),
                                            now),
-        transcript_hash=store_artifact(
-            conn,
-            "tool_transcript",
-            canonical_json([
-                {
-                    "event": "session",
-                    "requested_model": research.model,
-                    "reported_model": outcome.reported_model,
-                    "note": REPORTED_MODEL_NOTE,
-                },
-                *outcome.transcript,
-            ]),
-            now,
-        ),
+        transcript_hash=store_artifact(conn, "tool_transcript",
+                                       _transcript_content(research, outcome), now),
         cost_usd=cost,
     )
     try:

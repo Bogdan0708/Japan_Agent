@@ -2,8 +2,10 @@
 must be URLs actually fetched in that session).
 
 Probabilities travel as decimal strings so they never pass through float. The schema
-keeps to features structured outputs support (no numeric or string-length constraints);
-ranges and ordering are checked here."""
+keeps to features structured outputs support (no numeric or string-length constraints)
+plus a `pattern` on the probability strings: the CLI validates structured output with Ajv,
+so the pattern makes it reject non-decimal text (and have the model retry) before it
+reaches us. Ranges and ordering are still checked here."""
 
 from __future__ import annotations
 
@@ -16,7 +18,11 @@ P_MIN = Decimal("0.01")
 P_MAX = Decimal("0.99")
 CONFIDENCE = ("low", "medium", "high")
 
+# A decimal in [0, 1] written as plain digits. JSON Schema applies `pattern` to strings
+# only, so null still passes.
+DECIMAL_PATTERN = "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
 _NULLABLE_STRING = {"type": ["string", "null"]}
+_NULLABLE_DECIMAL = {"type": ["string", "null"], "pattern": DECIMAL_PATTERN}
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -34,11 +40,11 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "abstain": {"type": "boolean"},
         "abstain_reason": _NULLABLE_STRING,
-        "p_low": _NULLABLE_STRING,
-        "p_mid": _NULLABLE_STRING,
-        "p_high": _NULLABLE_STRING,
+        "p_low": _NULLABLE_DECIMAL,
+        "p_mid": _NULLABLE_DECIMAL,
+        "p_high": _NULLABLE_DECIMAL,
         "confidence": {"type": ["string", "null"], "enum": ["low", "medium", "high", None]},
-        "base_rate": _NULLABLE_STRING,
+        "base_rate": _NULLABLE_DECIMAL,
         "rules_interpretation": {"type": "string"},
         "evidence": {
             "type": "array",
