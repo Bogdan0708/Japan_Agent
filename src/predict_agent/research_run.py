@@ -70,6 +70,11 @@ MAX_DISCOVERY_AGE = timedelta(hours=24)
 # remaining candidate (SDK_ERROR and TIMEOUT only when they repeat).
 SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
 REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
+# Failures of the machinery rather than verdicts on one market: the run exits non-zero
+# (run-daily reports the research step as failed). Schema problems, budget/turn limits,
+# unfetched citations and markets that resolved meanwhile are expected per-market
+# outcomes, like BUDGET and VOLUME refusals.
+OPERATIONAL_FAILURES = SYSTEMIC_FAILURES | REPEATED_FAILURES | {"NO_RESULT", "RECORD_FAILED"}
 SDK_ERROR_STREAK = 2
 MARKET_RESOLVED = "MARKET_RESOLVED"
 # Weekly update forecasts (spec §5): a market is researched again once the cohort's newest
@@ -92,6 +97,14 @@ class ResearchSummary:
     updates: int = 0
     failed: Counter[str] = field(default_factory=Counter)
     skipped: Counter[str] = field(default_factory=Counter)
+
+    def operational_failures(self) -> dict[str, int]:
+        """Failures that mean the research machinery is broken (see OPERATIONAL_FAILURES);
+        anything unrecognised counts too, failing toward attention."""
+        known = OPERATIONAL_FAILURES | {"SCHEMA_INVALID", "UNFETCHED_CITATION", "MAX_BUDGET",
+                                        "MAX_TURNS", MARKET_RESOLVED}
+        return {code: n for code, n in sorted(self.failed.items())
+                if code in OPERATIONAL_FAILURES or code not in known}
 
 
 def cohort_identity(

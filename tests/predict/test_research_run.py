@@ -812,6 +812,24 @@ class CliTests(ResearchRunTestCase):
         self.assertIn("forecasts 1 (abstained 0)", output)
         self.assertIn("traded 2; updates 0", output)
 
+    def test_operational_failures_make_the_research_command_exit_5(self) -> None:
+        self.add_markets(OTHER[0])
+        bad = outcome(error="SDK_ERROR", cost_usd=None, structured_output=None)
+        code, output = self.cli(FakeRunner(bad, bad), [])
+        self.assertEqual(code, 5, output)
+        self.assertIn("research had operational failures: SDK_ERROR 2", output)
+
+    def test_per_market_outcomes_and_refusals_keep_exit_0(self) -> None:
+        invalid = outcome(structured_output=forecast_output(base_rate="5-10%"))
+        code, output = self.cli(FakeRunner(invalid), [])
+        self.assertEqual(code, 0, output)
+        self.assertIn("failed: SCHEMA_INVALID 1", output)
+
+    def test_an_unrecognised_failure_code_counts_as_operational(self) -> None:
+        odd = outcome(error="SOMETHING_NEW", cost_usd=None, structured_output=None)
+        code, output = self.cli(FakeRunner(odd), [])
+        self.assertEqual(code, 5, output)
+
     def test_a_second_research_run_is_refused_while_the_lock_is_held(self) -> None:
         lock_path = self.root / "data" / "predict.sqlite3.research.lock"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)

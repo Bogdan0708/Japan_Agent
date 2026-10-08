@@ -38,7 +38,7 @@ jobs:
         run: python -W error::ResourceWarning -m unittest discover -v
 
       - name: Validate shell wrappers
-        run: bash -n scripts/daily.sh scripts/weekly.sh
+        run: bash -n scripts/daily.sh scripts/weekly.sh scripts/predict-daily.sh
 
       - name: Check whitespace errors
         run: git diff --check
