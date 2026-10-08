@@ -64,6 +64,9 @@ from .util import canonical_json, parse_datetime
 
 ResearchRunner = Callable[[ResearchRequest], ResearchOutcome]
 
+# A book fetch/parse failure right after a forecast: it cannot be scored or traded, and the
+# next ones would fail the same way, so the run stops spending (see `baseline_outage`).
+BASELINE_UNAVAILABLE = "BASELINE_UNAVAILABLE"
 MAX_FAILED_ENTRY_ATTEMPTS = 2
 MAX_DISCOVERY_AGE = timedelta(hours=24)
 # Failures of the setup rather than of one market: no point burning an attempt on every
@@ -74,7 +77,8 @@ REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
 # (run-daily reports the research step as failed). Schema problems, budget/turn limits,
 # unfetched citations and markets that resolved meanwhile are expected per-market
 # outcomes, like BUDGET and VOLUME refusals.
-OPERATIONAL_FAILURES = SYSTEMIC_FAILURES | REPEATED_FAILURES | {"NO_RESULT", "RECORD_FAILED"}
+OPERATIONAL_FAILURES = SYSTEMIC_FAILURES | REPEATED_FAILURES | {
+    "NO_RESULT", "RECORD_FAILED", BASELINE_UNAVAILABLE}
 SDK_ERROR_STREAK = 2
 # Consecutive failed sessions of any code (no success in between) that stop the run: a
 # systemic problem disguised as per-market codes (e.g. a schema the model cannot meet).
@@ -270,6 +274,28 @@ def take_baseline(
         )
         return False
     return True
+
+
+def baseline_or_outage(
+    conn: sqlite3.Connection,
+    client: JsonClient,
+    forecast_id: int,
+    run_id: str,
+    now_fn: Callable[[], datetime],
+) -> tuple[bool, bool]:
+    """(baseline taken, book outage). The outage flag is set when `take_baseline` failed
+    and this call recorded a FETCH_ERROR or PARSE_ERROR snapshot refusal for the market
+    (thin or crossed books and refused baselines are market outcomes, not outages)."""
+    last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM refusals").fetchone()[0]
+    if take_baseline(conn, client, forecast_id, run_id, now_fn):
+        return True, False
+    outage = conn.execute(
+        "SELECT 1 FROM refusals r JOIN forecasts f ON f.condition_id = r.condition_id "
+        "WHERE f.forecast_id = ? AND r.id > ? AND r.run_id = ? AND r.stage = 'snapshot' "
+        "AND r.reason_code IN ('FETCH_ERROR', 'PARSE_ERROR') LIMIT 1",
+        (forecast_id, last, run_id),
+    ).fetchone()
+    return False, outage is not None
 
 
 def _string_leaves(value: object) -> list[str]:
@@ -571,7 +597,13 @@ def run_updates(
             continue
         streak.succeeded()
         summary.updates += 1
-        take_baseline(conn, client, forecast_id, run_id, now_fn)
+        _, outage = baseline_or_outage(conn, client, forecast_id, run_id, now_fn)
+        if outage:
+            summary.failed[BASELINE_UNAVAILABLE] += 1
+            for left in due[index + 1:]:
+                _abort(conn, run_id, left["condition_id"], "update", BASELINE_UNAVAILABLE,
+                       summary, now_fn)
+            return BASELINE_UNAVAILABLE
     return None
 
 
@@ -654,9 +686,13 @@ def run_research_day(
                 "SELECT abstained FROM forecasts WHERE forecast_id = ?", (forecast_id,)
             ).fetchone()[0]
             summary.abstentions += bool(abstained)
-            if take_baseline(conn, client, forecast_id, run_id, now_fn):
+            taken, outage = baseline_or_outage(conn, client, forecast_id, run_id, now_fn)
+            if taken:
                 summary.baselines += 1
                 summary.traded += trade_ready(conn, now_fn).traded
+            elif outage:
+                summary.failed[BASELINE_UNAVAILABLE] += 1
+                aborted = BASELINE_UNAVAILABLE
         resume_forecasts(conn, client, run_id, summary, now_fn)
     except BaseException:
         finish_run(conn, run_id, "FAILED", now_fn())

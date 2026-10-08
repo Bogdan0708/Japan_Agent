@@ -36,7 +36,7 @@ from predict_agent.research_run import (
     run_research_day,
 )
 from predict_agent.util import canonical_json, parse_datetime
-from tests.predict.fakes import RoutedOpener
+from tests.predict.fakes import RoutedOpener, http_error
 from tests.predict.fixtures import CONDITION_ID, NO_TOKEN, NOW, YES_TOKEN, clob_book
 from tests.predict.ledger_fixtures import seed_observation, seed_snapshot
 from tests.predict.trade_fixtures import seed_discovery, seed_tradeable_market
@@ -486,6 +486,56 @@ class UpdateForecastTests(ResearchRunTestCase):
             "SELECT stage FROM refusals WHERE reason_code = 'ABORTED_HOOK_ERROR'")]
         self.assertEqual(stages, ["update"])
 
+class BaselineOutageTests(ResearchRunTestCase):
+    """A post-forecast book fetch that fails cannot be scored or traded: stop spending."""
+
+    def later(self, days: float, runner: FakeRunner, **kwargs: Any) -> Any:
+        start = NOW + timedelta(days=days)
+        seed_discovery(self.conn, self.markets, at=start - timedelta(hours=1))
+        return self.run_day(runner, start=start, **kwargs)
+
+    def outage(self) -> list[Any]:
+        errors = [http_error(503) for _ in range(60)]
+        for error in errors:
+            self.addCleanup(error.close)  # unused ones would leak their temp file
+        return list(errors)
+
+    def test_a_book_outage_after_the_first_forecast_stops_the_entries(self) -> None:
+        self.add_markets(*OTHER[:2])
+        runner = FakeRunner()
+        summary = self.run_day(runner, book_queue=self.outage())
+        self.assertEqual(len(runner.requests), 1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 1)
+        self.assertEqual(dict(summary.failed), {"BASELINE_UNAVAILABLE": 1})
+        self.assertEqual(dict(summary.skipped), {"ABORTED_BASELINE_UNAVAILABLE": 2})
+        stages = [r[0] for r in self.conn.execute(
+            "SELECT stage FROM refusals WHERE reason_code = 'ABORTED_BASELINE_UNAVAILABLE'")]
+        self.assertEqual(stages, ["research", "research"])
+        self.assertEqual(summary.operational_failures(), {"BASELINE_UNAVAILABLE": 1})
+
+    def test_a_thin_book_is_not_an_outage(self) -> None:
+        self.add_markets(OTHER[0])
+        runner = FakeRunner()
+        summary = self.run_day(runner, book_queue=books(crossed=True) + books(OTHER[0]) + books(crossed=True) * 3)
+        self.assertEqual(len(runner.requests), 2)
+        self.assertEqual(dict(summary.failed), {})
+        self.assertGreater(self.scalar(
+            "SELECT COUNT(*) FROM refusals WHERE reason_code = 'CROSSED_BOOK'"), 0)
+
+    def test_a_book_outage_after_an_update_stops_the_rest(self) -> None:
+        self.add_markets(OTHER[0])
+        self.run_day(FakeRunner(), book_queue=books() + books(OTHER[0]))
+        self.add_markets(OTHER[1])
+        runner = FakeRunner()
+        summary = self.later(8, runner, book_queue=self.outage())
+        self.assertEqual(len(runner.requests), 1)  # one update; the second update and entry stop
+        self.assertEqual(dict(summary.failed), {"BASELINE_UNAVAILABLE": 1})
+        self.assertEqual(summary.skipped["ABORTED_BASELINE_UNAVAILABLE"], 2)
+        stages = sorted(r[0] for r in self.conn.execute(
+            "SELECT stage FROM refusals WHERE reason_code = 'ABORTED_BASELINE_UNAVAILABLE'"))
+        self.assertEqual(stages, ["research", "update"])
+
+
 class RetryLimitTests(ResearchRunTestCase):
     def failed_attempts(self, cohort: str, condition_id: str, *errors: str) -> None:
         for index, error in enumerate(errors):
@@ -860,6 +910,16 @@ class CliTests(ResearchRunTestCase):
         code, output = self.cli(FakeRunner(bad, bad), [])
         self.assertEqual(code, 5, output)
         self.assertIn("research had operational failures: SDK_ERROR 2", output)
+
+    def test_a_post_forecast_book_outage_exits_5(self) -> None:
+        self.add_markets(OTHER[0])
+        errors = [http_error(503) for _ in range(60)]
+        for error in errors:
+            self.addCleanup(error.close)
+        runner = FakeRunner()
+        code, output = self.cli(runner, list(errors))
+        self.assertEqual((code, len(runner.requests)), (5, 1), output)
+        self.assertIn("BASELINE_UNAVAILABLE 1", output)
 
     def test_per_market_outcomes_and_refusals_keep_exit_0(self) -> None:
         invalid = outcome(structured_output=forecast_output(base_rate="5-10%"))
