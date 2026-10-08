@@ -175,26 +175,34 @@ def fail_attempt(
     conn: sqlite3.Connection, attempt_id: int, cost_usd: Decimal, error: str, now: datetime
 ) -> None:
     """Close an attempt that produced no forecast, keeping what it cost."""
+    with transaction(conn):
+        fail_attempt_locked(conn, attempt_id, cost_usd, error, now)
+
+
+def fail_attempt_locked(
+    conn: sqlite3.Connection, attempt_id: int, cost_usd: Decimal, error: str, now: datetime
+) -> None:
+    """`fail_attempt` inside a write transaction the caller already holds, so the closing
+    commits together with whatever else the caller writes (e.g. its refusal)."""
     _valid_cost(cost_usd)
     if not error:
         raise ForecastError("a failed attempt needs an error")
-    with transaction(conn):
-        row = conn.execute(
-            "SELECT status FROM research_attempts WHERE attempt_id = ?", (attempt_id,)
-        ).fetchone()
-        if row is None or row["status"] != "STARTED":
-            raise ForecastError(f"attempt {attempt_id} is not STARTED")
-        conn.execute(
-            "UPDATE research_attempts SET status = 'FAILED', finished_at = ?, cost_usd = ?, "
-            "error = ? WHERE attempt_id = ?",
-            (isoformat(now), money_text(cost_usd), error, attempt_id),
-        )
-        append_journal(
-            conn,
-            "ATTEMPT_FAILED",
-            {"attempt_id": attempt_id, "cost_usd": money_text(cost_usd), "error": error},
-            now,
-        )
+    row = conn.execute(
+        "SELECT status FROM research_attempts WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+    if row is None or row["status"] != "STARTED":
+        raise ForecastError(f"attempt {attempt_id} is not STARTED")
+    conn.execute(
+        "UPDATE research_attempts SET status = 'FAILED', finished_at = ?, cost_usd = ?, "
+        "error = ? WHERE attempt_id = ?",
+        (isoformat(now), money_text(cost_usd), error, attempt_id),
+    )
+    append_journal(
+        conn,
+        "ATTEMPT_FAILED",
+        {"attempt_id": attempt_id, "cost_usd": money_text(cost_usd), "error": error},
+        now,
+    )
 
 
 def unfinished_attempts(conn: sqlite3.Connection, cohort_id: str) -> list[int]:

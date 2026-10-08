@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -518,6 +519,22 @@ class FailureTranscriptTests(ResearchRunTestCase):
 
         self.run_day(resolving, book_queue=[])  # type: ignore[arg-type]
         self.assert_transcript_kept("MARKET_RESOLVED")
+
+    def test_attempt_status_transcript_and_refusal_commit_together(self) -> None:
+        # If the refusal cannot be written, the attempt must not be closed without its
+        # transcript: everything rolls back and the attempt stays STARTED for recovery.
+        runner = FakeRunner(outcome(structured_output=forecast_output(base_rate="5-10%")))
+        with mock.patch("predict_agent.research_run.record_refusal",
+                        side_effect=sqlite3.OperationalError("disk I/O error")), \
+                self.assertRaises(sqlite3.OperationalError):
+            self.run_day(runner, book_queue=[])
+        self.assertEqual(self.scalar("SELECT status FROM research_attempts"), "STARTED")
+        self.assertEqual(
+            self.scalar("SELECT COUNT(*) FROM artifacts WHERE kind = 'tool_transcript'"), 0)
+        # The next run recovers it (charged at the cap); its own attempt fails offline.
+        retry = FakeRunner(outcome(error="SDK_ERROR", detail="offline", structured_output=None))
+        recovered = self.run_day(retry, book_queue=[], start=NOW + timedelta(minutes=5))
+        self.assertEqual(recovered.recovered, 1)
 
 
 class ResolvedMarketTests(ResearchRunTestCase):
