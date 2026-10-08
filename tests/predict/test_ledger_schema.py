@@ -9,6 +9,7 @@ from unittest import mock
 from predict_agent.db import SCHEMA, SCHEMA_VERSION, connect
 from predict_agent.ledger_schema import LEDGER_SCHEMA
 
+MARKET_INDEXES = {"discoveries_by_market", "snapshots_by_market", "observations_by_market"}
 LEDGER_TABLES = {
     "artifacts",
     "cohorts",
@@ -101,10 +102,10 @@ class LedgerSchemaTests(unittest.TestCase):
         rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         return {row[0] for row in rows}
 
-    def test_fresh_database_has_ledger_tables_and_version_3(self) -> None:
+    def test_fresh_database_has_ledger_tables_and_version_4(self) -> None:
         conn = connect(self.path)
         try:
-            self.assertEqual(SCHEMA_VERSION, 3)
+            self.assertEqual(SCHEMA_VERSION, 4)
             self.assertLessEqual(LEDGER_TABLES, self.tables(conn))
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             columns = {r[1] for r in conn.execute("PRAGMA table_info(resolution_observations)")}
@@ -117,7 +118,7 @@ class LedgerSchemaTests(unittest.TestCase):
         conn = connect(self.path)
         try:
             version = conn.execute("SELECT version FROM schema_version").fetchall()
-            self.assertEqual([row[0] for row in version], [3])
+            self.assertEqual([row[0] for row in version], [4])
             self.assertLessEqual(LEDGER_TABLES, self.tables(conn))
             self.assertEqual(conn.execute("SELECT run_id FROM runs").fetchone()[0], "r1")
             observation = conn.execute("SELECT * FROM resolution_observations").fetchone()
@@ -125,7 +126,25 @@ class LedgerSchemaTests(unittest.TestCase):
             self.assertIsNone(observation["resolution_requested_at"])
         finally:
             conn.close()
-        connect(self.path).close()  # reconnecting at v3 changes nothing
+        connect(self.path).close()  # reconnecting at v4 changes nothing
+
+    def test_v3_database_gains_the_market_lookup_indexes(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        raw = sqlite3.connect(self.path)
+        try:
+            raw.executescript(SCHEMA.split("CREATE INDEX")[0])
+            raw.execute("INSERT INTO schema_version (version) VALUES (3)")
+            raw.commit()
+        finally:
+            raw.close()
+        conn = connect(self.path)
+        try:
+            self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 4)
+            rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+            indexes = {row[0] for row in rows}
+            self.assertLessEqual(MARKET_INDEXES, indexes)
+        finally:
+            conn.close()
 
     def test_unsupported_version_is_refused_without_changing_the_file(self) -> None:
         self.write_old_database(1)

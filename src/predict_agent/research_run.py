@@ -7,11 +7,17 @@
    has closed, attach the earliest pair of books already stored inside the window (a crash
    between storing the books and attaching them loses nothing), and mark the rest
    NO_TIMELY_BASELINE; decide whatever has a baseline.
-4. For each eligible market of the latest discovery run that this cohort has not forecast
+4. Weekly update forecasts (spec §5), first, so new markets can never starve them: markets
+   where the cohort holds an open ticket, once its newest attempt there is a week old;
+   same prompt and checks, same daily budget (not the entry volume), a baseline for
+   scoring, never a trade.
+5. For each eligible market of the latest discovery run that this cohort has not forecast
    and whose resolution has not started, in order: check the day's budget and volume, open
    an attempt, run research (no price), validate the output, recheck that resolution has
    not started meanwhile, record the forecast (or fail the attempt with its cost), then
    fetch both books immediately as the post-forecast baseline and decide every portfolio.
+   One failure streak spans steps 4 and 5: a systemic failure, or repeated SDK errors or
+   timeouts, stops both, and every market left gets an ABORTED_<code> refusal.
 
 The research runner is injected, so tests run with no network and no SDK."""
 
@@ -58,13 +64,36 @@ from .util import canonical_json, parse_datetime
 
 ResearchRunner = Callable[[ResearchRequest], ResearchOutcome]
 
+# A book fetch/parse failure right after a forecast: it cannot be scored or traded, and the
+# next ones would fail the same way, so the run stops spending (see `baseline_outage`).
+BASELINE_UNAVAILABLE = "BASELINE_UNAVAILABLE"
 MAX_FAILED_ENTRY_ATTEMPTS = 2
 MAX_DISCOVERY_AGE = timedelta(hours=24)
 # Failures of the setup rather than of one market: no point burning an attempt on every
-# remaining candidate (SDK_ERROR only when it repeats).
-SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
+# remaining candidate (SDK_ERROR and TIMEOUT only when they repeat).
+# CLEANUP_TIMEOUT: closing the session overran its bound, so the CLI child may still be
+# running; spawning more sessions on top of it is not safe.
+SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR", "CLEANUP_TIMEOUT"})
+REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
+# Failures of the machinery rather than verdicts on one market: the run exits non-zero
+# (run-daily reports the research step as failed). Schema problems, budget/turn limits,
+# unfetched citations and markets that resolved meanwhile are expected per-market
+# outcomes, like BUDGET and VOLUME refusals.
+OPERATIONAL_FAILURES = SYSTEMIC_FAILURES | REPEATED_FAILURES | {
+    "NO_RESULT", "RECORD_FAILED", BASELINE_UNAVAILABLE}
 SDK_ERROR_STREAK = 2
+# Consecutive failed sessions of any code (no success in between) that stop the run: a
+# systemic problem disguised as per-market codes (e.g. a schema the model cannot meet).
+ANY_FAILURE_STREAK = 3
+# Failed sessions, with no forecast and no update in the run, that make it operational.
+ALL_FAILED_THRESHOLD = 3
 MARKET_RESOLVED = "MARKET_RESOLVED"
+# A queued market that stopped being eligible (resolution started, or too close to its end
+# date) while earlier sessions ran: no attempt is opened.
+NO_LONGER_ELIGIBLE = "NO_LONGER_ELIGIBLE"
+# Weekly update forecasts (spec §5): a market is researched again once the cohort's newest
+# attempt there is this old.
+UPDATE_INTERVAL = timedelta(days=7)
 # The init report's model field is recorded, never enforced: its exact name and value are
 # unverified until the Plan 4 live smoke run.
 REPORTED_MODEL_NOTE = "model named by the session init report; unverified, not enforced"
@@ -79,8 +108,21 @@ class ResearchSummary:
     baselines: int = 0
     no_timely_baseline: int = 0
     traded: int = 0
+    updates: int = 0
     failed: Counter[str] = field(default_factory=Counter)
     skipped: Counter[str] = field(default_factory=Counter)
+
+    def operational_failures(self) -> dict[str, int]:
+        """Failures that mean the research machinery is broken (see OPERATIONAL_FAILURES);
+        anything unrecognised counts too, failing toward attention."""
+        known = OPERATIONAL_FAILURES | {"SCHEMA_INVALID", "UNFETCHED_CITATION", "MAX_BUDGET",
+                                        "MAX_TURNS", MARKET_RESOLVED}
+        broken = {code: n for code, n in sorted(self.failed.items())
+                  if code in OPERATIONAL_FAILURES or code not in known}
+        total = sum(self.failed.values())
+        if total >= ALL_FAILED_THRESHOLD and self.forecasts == 0 and self.updates == 0:
+            broken["ALL_SESSIONS_FAILED"] = total
+        return broken
 
 
 def cohort_identity(
@@ -120,6 +162,32 @@ def resolution_started(
     return False
 
 
+def entry_eligible(
+    conn: sqlite3.Connection, row: sqlite3.Row, now: datetime, min_hours_to_close: int
+) -> bool:
+    """A new entry may be researched at `now`: the market's resolution has not started and
+    it ends at least `min_hours_to_close` from now (no end date fails closed). The cutoff
+    bounds when a session may start: `run_research_day` rechecks it just before each paid
+    session, and a session that started in time is recorded even if it runs past the cutoff."""
+    if resolution_started(conn, row["condition_id"]):
+        return False
+    end_date = json.loads(row["rules_json"]).get("end_date")
+    return bool(end_date) and parse_datetime(end_date) >= now + timedelta(hours=min_hours_to_close)
+
+
+def update_eligible(
+    conn: sqlite3.Connection, row: sqlite3.Row, now: datetime, min_hours_to_close: int
+) -> bool:
+    """An update may be researched at `now`: the market's resolution has not started and
+    `now` is before its end date minus `min_hours_to_close` (no end date fails closed).
+    Like `entry_eligible`, it bounds when a session may start, not when it may finish."""
+    if resolution_started(conn, row["condition_id"]):
+        return False
+    end_date = json.loads(row["rules_json"]).get("end_date")
+    return bool(end_date) and now < parse_datetime(end_date) - timedelta(
+        hours=min_hours_to_close)
+
+
 def candidates(
     conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
 ) -> list[sqlite3.Row]:
@@ -143,15 +211,46 @@ def candidates(
         "ORDER BY d.condition_id",
         (run_id, cohort_id, cohort_id, INTERRUPTED, MAX_FAILED_ENTRY_ATTEMPTS),
     ).fetchall()
-    horizon = now + timedelta(hours=min_hours_to_close)
-    selected = []
+    return [row for row in rows if entry_eligible(conn, row, now, min_hours_to_close)]
+
+
+def due_updates(
+    conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
+) -> list[sqlite3.Row]:
+    """Markets due a weekly update forecast for this cohort: it holds an OPEN ticket there
+    in any portfolio, the market's resolution has not started, it is still more than
+    `min_hours_to_close` from its end date (the horizon entries use: after it a session
+    could look up the outcome; a current rules version with no end date fails closed and
+    is skipped), and the cohort's newest research attempt on it (entry or update, whatever
+    its outcome) started at least UPDATE_INTERVAL ago. Oldest first. Rows carry the
+    market's current rules version."""
+    rows = conn.execute(
+        "SELECT m.condition_id, m.current_rules_hash AS rules_hash, r.rules_json "
+        "FROM markets m JOIN rules_versions r ON r.condition_id = m.condition_id "
+        "AND r.rules_hash = m.current_rules_hash "
+        "WHERE EXISTS (SELECT 1 FROM paper_tickets t JOIN portfolios p "
+        "ON p.portfolio_id = t.portfolio_id WHERE p.cohort_id = ? "
+        "AND t.condition_id = m.condition_id AND t.status = 'OPEN') "
+        "ORDER BY m.condition_id",
+        (cohort_id,),
+    ).fetchall()
+    due: list[tuple[datetime, sqlite3.Row]] = []
     for row in rows:
-        if resolution_started(conn, row["condition_id"]):
+        if not update_eligible(conn, row, now, min_hours_to_close):
             continue
-        end_date = json.loads(row["rules_json"]).get("end_date")
-        if end_date and parse_datetime(end_date) >= horizon:
-            selected.append(row)
-    return selected
+        started = [
+            parse_datetime(a["started_at"])
+            for a in conn.execute(
+                "SELECT started_at FROM research_attempts WHERE cohort_id = ? "
+                "AND condition_id = ?",
+                (cohort_id, row["condition_id"]),
+            )
+        ]
+        last = max(started) if started else None
+        if last is None or now - last >= UPDATE_INTERVAL:
+            due.append((last or now, row))
+    due.sort(key=lambda item: (item[0], item[1]["condition_id"]))
+    return [row for _, row in due]
 
 
 def take_baseline(
@@ -194,6 +293,28 @@ def take_baseline(
         )
         return False
     return True
+
+
+def baseline_or_outage(
+    conn: sqlite3.Connection,
+    client: JsonClient,
+    forecast_id: int,
+    run_id: str,
+    now_fn: Callable[[], datetime],
+) -> tuple[bool, bool]:
+    """(baseline taken, book outage). The outage flag is set when `take_baseline` failed
+    and this call recorded a FETCH_ERROR or PARSE_ERROR snapshot refusal for the market
+    (thin or crossed books and refused baselines are market outcomes, not outages)."""
+    last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM refusals").fetchone()[0]
+    if take_baseline(conn, client, forecast_id, run_id, now_fn):
+        return True, False
+    outage = conn.execute(
+        "SELECT 1 FROM refusals r JOIN forecasts f ON f.condition_id = r.condition_id "
+        "WHERE f.forecast_id = ? AND r.id > ? AND r.run_id = ? AND r.stage = 'snapshot' "
+        "AND r.reason_code IN ('FETCH_ERROR', 'PARSE_ERROR') LIMIT 1",
+        (forecast_id, last, run_id),
+    ).fetchone()
+    return False, outage is not None
 
 
 def _string_leaves(value: object) -> list[str]:
@@ -264,8 +385,10 @@ def research_market(
     research: ResearchConfig,
     run_id: str,
     now_fn: Callable[[], datetime],
+    kind: str = "entry",
 ) -> tuple[int | None, str | None]:
-    """(forecast_id, None) on success, (None, failure code) otherwise. The attempt is
+    """(forecast_id, None) on success, (None, failure code) otherwise. `kind` is `entry`
+    or `update` (same prompt and checks; only entries trade). The attempt is
     always closed: SUCCEEDED with the forecast, or FAILED with what it cost; a failure's
     detail (tool names, SDK error type, schema problem) is kept in the run's refusals."""
     rules = json.loads(row["rules_json"])
@@ -277,7 +400,7 @@ def research_market(
         end_date=parse_datetime(rules["end_date"]),
         today=started,
     )
-    attempt_id = start_attempt(conn, cohort_id, row["condition_id"], "entry", started)
+    attempt_id = start_attempt(conn, cohort_id, row["condition_id"], kind, started)
     outcome = runner(
         ResearchRequest(
             system_prompt=SYSTEM_PROMPT,
@@ -316,7 +439,7 @@ def research_market(
         cohort_id=cohort_id,
         condition_id=row["condition_id"],
         rules_hash=row["rules_hash"],
-        kind="entry",
+        kind=kind,
         abstained=parsed.abstained,
         abstain_reason=parsed.abstain_reason,
         p_low=parsed.p_low,
@@ -403,14 +526,109 @@ def resume_forecasts(
                     try:
                         attach_baseline(conn, forecast_id, pair[0], pair[1], now_fn())
                     except ForecastError as error:
-                        record_refusal(conn, run_id, None, "baseline", "BASELINE_REFUSED",
-                                       str(error), now_fn())
+                        condition_id = conn.execute(
+                            "SELECT condition_id FROM forecasts WHERE forecast_id = ?",
+                            (forecast_id,),
+                        ).fetchone()["condition_id"]
+                        record_refusal(conn, run_id, condition_id, "baseline",
+                                       "BASELINE_REFUSED", str(error), now_fn())
                     else:
                         summary.baselines += 1
                         summary.traded += trade_ready(conn, now_fn).traded
                         continue
                 mark_no_timely_baseline(conn, forecast_id, now_fn())
                 summary.no_timely_baseline += 1
+
+
+@dataclass
+class FailureStreak:
+    """Consecutive failures across the whole run (updates and entries alike): SDK
+    errors/timeouts, and failures of any code."""
+
+    count: int = 0
+    any_count: int = 0
+
+    def failed(self, code: str) -> bool:
+        """Count one failure; True when it should stop the run (a systemic failure, the
+        SDK_ERROR_STREAK-th repeated SDK error/timeout in a row, or the
+        ANY_FAILURE_STREAK-th failed session of any code in a row)."""
+        self.count = self.count + 1 if code in REPEATED_FAILURES else 0
+        self.any_count += 1
+        return (code in SYSTEMIC_FAILURES or self.count >= SDK_ERROR_STREAK
+                or self.any_count >= ANY_FAILURE_STREAK)
+
+    def succeeded(self) -> None:
+        self.count = 0
+        self.any_count = 0
+
+
+def _abort(
+    conn: sqlite3.Connection,
+    run_id: str,
+    condition_id: str,
+    stage: str,
+    code: str,
+    summary: ResearchSummary,
+    now_fn: Callable[[], datetime],
+) -> None:
+    """Like BUDGET and VOLUME, every market left unresearched after an abort gets a durable
+    refusal, not just a line in the summary."""
+    record_refusal(conn, run_id, condition_id, stage, "ABORTED_" + code,
+                   f"run aborted after {code}", now_fn())
+    summary.skipped["ABORTED_" + code] += 1
+
+
+def run_updates(
+    conn: sqlite3.Connection,
+    client: JsonClient,
+    runner: ResearchRunner,
+    cohort_id: str,
+    research: ResearchConfig,
+    run_id: str,
+    summary: ResearchSummary,
+    streak: FailureStreak,
+    now_fn: Callable[[], datetime],
+    min_hours_to_close: int,
+) -> str | None:
+    """Research every due update forecast, before the day's new entries so a backlog of
+    new markets can never starve them (updates are few: one per open-ticket market per
+    week; none once a market is within `min_hours_to_close` of its end date). Updates
+    spend the same daily budget (a refused one is recorded as BUDGET at
+    stage `update`) but not the entry volume; each takes a baseline for scoring and never
+    trades. Returns the failure code that stopped the run, or None."""
+    due = due_updates(conn, cohort_id, now_fn(), min_hours_to_close)
+    for index, row in enumerate(due):
+        if not update_eligible(conn, row, now_fn(), min_hours_to_close):
+            record_refusal(conn, run_id, row["condition_id"], "update", NO_LONGER_ELIGIBLE,
+                           "the market left its update window while queued", now_fn())
+            summary.skipped[NO_LONGER_ELIGIBLE] += 1
+            continue
+        usage = day_usage(conn, now_fn(), research.per_forecast_usd)
+        if usage.spent_usd + research.per_forecast_usd > research.daily_usd:
+            record_refusal(conn, run_id, row["condition_id"], "update", "BUDGET", "", now_fn())
+            summary.skipped["UPDATE_BUDGET"] += 1
+            continue
+        forecast_id, failure = research_market(conn, runner, cohort_id, row, research,
+                                               run_id, now_fn, kind="update")
+        if forecast_id is None:
+            code = failure or "UNKNOWN"
+            summary.failed[code] += 1
+            if streak.failed(code):
+                for left in due[index + 1:]:
+                    _abort(conn, run_id, left["condition_id"], "update", code, summary,
+                           now_fn)
+                return code
+            continue
+        streak.succeeded()
+        summary.updates += 1
+        _, outage = baseline_or_outage(conn, client, forecast_id, run_id, now_fn)
+        if outage:
+            summary.failed[BASELINE_UNAVAILABLE] += 1
+            for left in due[index + 1:]:
+                _abort(conn, run_id, left["condition_id"], "update", BASELINE_UNAVAILABLE,
+                       summary, now_fn)
+            return BASELINE_UNAVAILABLE
+    return None
 
 
 def _discovery_is_stale(conn: sqlite3.Connection, now: datetime) -> bool:
@@ -451,13 +669,27 @@ def run_research_day(
         summary.traded += trade_ready(conn, now_fn).traded
         stop: str | None = None
         pending = candidates(conn, cohort_id, now_fn(), policy.min_hours_to_close)
+        aborted: str | None = None
+        streak = FailureStreak()
         if _discovery_is_stale(conn, now_fn()):
             record_refusal(conn, run_id, None, "research", "STALE_DISCOVERY",
                            "the latest discovery run is older than 24 hours", now_fn())
             summary.skipped["STALE_DISCOVERY"] = 1
             pending = []
-        sdk_errors = 0
-        for index, row in enumerate(pending):
+        else:
+            aborted = run_updates(conn, client, runner, cohort_id, research, run_id, summary,
+                                  streak, now_fn, policy.min_hours_to_close)
+        for row in pending:
+            if aborted is not None:
+                _abort(conn, run_id, row["condition_id"], "research", aborted, summary,
+                       now_fn)
+                continue
+            if not entry_eligible(conn, row, now_fn(), policy.min_hours_to_close):
+                record_refusal(conn, run_id, row["condition_id"], "research",
+                               NO_LONGER_ELIGIBLE,
+                               "the market left its entry window while queued", now_fn())
+                summary.skipped[NO_LONGER_ELIGIBLE] += 1
+                continue
             if stop is None:
                 stop = budget_refusal(
                     day_usage(conn, now_fn(), research.per_forecast_usd),
@@ -475,26 +707,22 @@ def run_research_day(
             if forecast_id is None:
                 code = failure or "UNKNOWN"
                 summary.failed[code] += 1
-                sdk_errors = sdk_errors + 1 if code == "SDK_ERROR" else 0
-                if code in SYSTEMIC_FAILURES or sdk_errors >= SDK_ERROR_STREAK:
-                    # Like BUDGET and VOLUME, every market left unresearched gets a
-                    # durable refusal, not just a line in the summary.
-                    for left in pending[index + 1:]:
-                        record_refusal(conn, run_id, left["condition_id"], "research",
-                                       "ABORTED_" + code, f"run aborted after {code}",
-                                       now_fn())
-                        summary.skipped["ABORTED_" + code] += 1
-                    break
+                if streak.failed(code):
+                    aborted = code
                 continue
-            sdk_errors = 0
+            streak.succeeded()
             summary.forecasts += 1
             abstained = conn.execute(
                 "SELECT abstained FROM forecasts WHERE forecast_id = ?", (forecast_id,)
             ).fetchone()[0]
             summary.abstentions += bool(abstained)
-            if take_baseline(conn, client, forecast_id, run_id, now_fn):
+            taken, outage = baseline_or_outage(conn, client, forecast_id, run_id, now_fn)
+            if taken:
                 summary.baselines += 1
                 summary.traded += trade_ready(conn, now_fn).traded
+            elif outage:
+                summary.failed[BASELINE_UNAVAILABLE] += 1
+                aborted = BASELINE_UNAVAILABLE
         resume_forecasts(conn, client, run_id, summary, now_fn)
     except BaseException:
         finish_run(conn, run_id, "FAILED", now_fn())

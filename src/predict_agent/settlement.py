@@ -101,7 +101,9 @@ def governing_observation(
     return governing, False
 
 
-def _resolved_since(rows: Sequence[sqlite3.Row]) -> datetime | None:
+def resolved_since(rows: Sequence[sqlite3.Row]) -> datetime | None:
+    """When the market was first reported `resolved` (evidence end of the earliest such
+    observation), even if a later observation re-posed it; None if never."""
     times = [_interval(row)[1] for row in rows if row["status"] == "resolved"]
     return min(times) if times else None
 
@@ -123,6 +125,17 @@ def _pending_reason(
     ):
         return PendingReason.UNSETTLEABLE
     return None
+
+
+def final_outcome(rows: Sequence[sqlite3.Row]) -> str | None:
+    """The market's settled outcome (YES, NO or HALF) by exactly the rule settlement uses
+    (governing observation resolved, unambiguous, CONFIRMED against Gamma); None while
+    unresolved, ambiguous, unconfirmed or unsettleable."""
+    observation, ambiguous = governing_observation(rows)
+    if observation is None or _pending_reason(observation, ambiguous) is not None:
+        return None
+    outcome: str = observation["outcome"]
+    return outcome
 
 
 def settle_open_tickets(conn: sqlite3.Connection, now: datetime) -> SettlementSummary:
@@ -153,7 +166,7 @@ def settle_open_tickets(conn: sqlite3.Connection, now: datetime) -> SettlementSu
                         ticket_id,
                         ticket["condition_id"],
                         reason or PendingReason.AWAITING_RESOLUTION,
-                        _resolved_since(rows),
+                        resolved_since(rows),
                     )
                 )
                 continue

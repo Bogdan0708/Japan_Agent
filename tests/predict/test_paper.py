@@ -231,7 +231,7 @@ class TradeTests(PaperTestCase):
             return_value=[self.primary, self.shadow],
         ):
             summary = trade_ready(self.conn, lambda: DECIDE_AT)
-        self.assertEqual((summary.traded, summary.refused), (1, {}))
+        self.assertEqual((summary.traded, summary.refused, summary.skipped), (1, {}, 1))
         rows = self.conn.execute(
             "SELECT portfolio_id FROM decisions WHERE forecast_id = ?", (forecast,)
         ).fetchall()
