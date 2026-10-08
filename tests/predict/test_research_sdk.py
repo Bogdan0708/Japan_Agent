@@ -123,6 +123,11 @@ class HookTests(unittest.TestCase):
             "https://example.com/?u=polymarket%252Ecom": False,
             "https://example.com/r?to=https%3A%2F%2Fkalshi.com%2Fm": False,
             "https://www.notpolymarket.com/": True,
+            "https://www-polymarket-com.translate.goog/x": False,
+            "https://news-kalshi-com.translate.goog/m": False,
+            "https://example.com/?u=POLYMARKET%2ECOM": False,
+            "https://example.com/?u=polymarket%252525252Ecom": False,  # five layers deep
+            "https://example.com/a%2520b": True,  # decodes to a stable value: allowed
         }
         fake, outcome = run(Script(calls=[
             ToolCall("WebFetch", {"url": url, "prompt": "p"}, fetch_page(url)) for url in urls

@@ -125,31 +125,34 @@ def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
         return f"{host} is on the blocked-domain list"
     if host in _LOCAL_NAMES or host.endswith(_LOCAL_SUFFIXES):
         return f"{host} is a local-network name"
-    text = _decoded(url).lower()
+    decoded = _decoded(url)
+    if decoded is None:
+        return f"url is percent-encoded too deeply to check: {url!r}"
+    text = decoded.lower()
     for domain in blocked:
         if _mentions(text, domain):
             return f"url refers to blocked domain {domain}"
     return None
 
 
-def _decoded(url: str) -> str:
-    """`url` percent-decoded until it stops changing (bounded), so an escaped dot or a
-    double-encoded copy of a blocked name is still seen."""
+def _decoded(url: str) -> str | None:
+    """`url` percent-decoded until it stops changing, so an escaped dot or a double-encoded
+    copy of a blocked name is still seen; None when it still changes after four rounds
+    (the caller refuses it: fail closed)."""
     for _ in range(4):
         decoded = unquote(url)
         if decoded == url:
-            break
+            return url
         url = decoded
-    return url
+    return None if unquote(url) != url else url
 
 
 def _mentions(text: str, domain: str) -> bool:
     """True when `text` names `domain` as a whole name (not inside a longer word such as
-    `archive.php` for `archive.ph`), or in Google Translate's proxy form
-    (`polymarket-com.translate.goog`)."""
-    edge = r"(?<![a-z0-9-])"
-    plain = edge + re.escape(domain) + r"(?![a-z0-9-])"
-    proxied = edge + re.escape(domain.replace(".", "-")) + r"\.translate\.goog"
+    `archive.php` for `archive.ph`), or in Google Translate's proxy form, where every dot
+    becomes a dash, so a subdomain arrives as `www-polymarket-com.translate.goog`."""
+    plain = r"(?<![a-z0-9-])" + re.escape(domain) + r"(?![a-z0-9-])"
+    proxied = r"(?<![a-z0-9])" + re.escape(domain.replace(".", "-")) + r"\.translate\.goog"
     return re.search(plain, text) is not None or re.search(proxied, text) is not None
 
 
