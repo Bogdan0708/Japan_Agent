@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from predict_agent.collect import (
+    book_outage,
     discover,
     poll_resolutions,
     record_geoblock,
@@ -15,7 +16,7 @@ from predict_agent.collect import (
     start_run,
 )
 from predict_agent.config import load_discovery_config
-from predict_agent.db import connect, verify_journal
+from predict_agent.db import connect, record_refusal, verify_journal
 from predict_agent.http import JsonClient
 from tests.predict.fakes import RoutedOpener, http_error
 from tests.predict.fixtures import (
@@ -177,6 +178,47 @@ class SnapshotTests(CollectTestCase):
         )
         snapshot_eligible(self.conn, self.client(opener), self.run_id, self.run_id, lambda: NOW)
         self.assertEqual(self.refusal_codes(), ["FETCH_ERROR"])
+
+
+class BookOutageTests(CollectTestCase):
+    def refuse(self, code: str, n: int) -> None:
+        for _ in range(n):
+            record_refusal(self.conn, self.run_id, None, "snapshot", code, "", NOW)
+
+    def test_healthy_run_is_none(self) -> None:
+        self.assertIsNone(book_outage(self.conn, self.run_id, 40))
+
+    def test_nothing_requested_is_none(self) -> None:
+        self.assertIsNone(book_outage(self.conn, self.run_id, 0))
+
+    def test_every_book_failed(self) -> None:
+        self.refuse("FETCH_ERROR", 4)
+        self.assertEqual(book_outage(self.conn, self.run_id, 0), "no book could be stored")
+
+    def test_one_failure_of_forty_is_tolerated(self) -> None:
+        self.refuse("FETCH_ERROR", 1)
+        self.assertIsNone(book_outage(self.conn, self.run_id, 39))
+
+    def test_two_failures_of_forty_are_an_outage(self) -> None:
+        self.refuse("FETCH_ERROR", 1)
+        self.refuse("PARSE_ERROR", 1)
+        self.assertEqual(book_outage(self.conn, self.run_id, 38),
+                         "2 of 40 book requests failed to fetch or parse")
+
+    def test_market_refusals_are_not_an_outage(self) -> None:
+        self.refuse("EMPTY_SIDE", 5)
+        self.refuse("CROSSED_BOOK", 5)
+        self.assertIsNone(book_outage(self.conn, self.run_id, 10))
+
+    def test_only_market_refusals_and_nothing_stored_is_an_outage(self) -> None:
+        self.refuse("EMPTY_SIDE", 2)
+        self.assertEqual(book_outage(self.conn, self.run_id, 0), "no book could be stored")
+
+    def test_other_runs_and_stages_do_not_count(self) -> None:
+        other = start_run(self.conn, "test", POLICY_HASH, NOW)
+        record_refusal(self.conn, other, None, "snapshot", "FETCH_ERROR", "", NOW)
+        record_refusal(self.conn, self.run_id, None, "discovery", "FETCH_ERROR", "", NOW)
+        self.assertIsNone(book_outage(self.conn, self.run_id, 40))
 
 
 class ResolutionPollTests(CollectTestCase):

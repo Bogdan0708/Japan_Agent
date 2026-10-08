@@ -363,6 +363,29 @@ def snapshot_eligible(
     return stored
 
 
+BOOK_FAILURE_SHARE = 20  # a data run fails when >= 1/20 (5%) of book requests fail to fetch/parse
+
+
+def book_outage(conn: sqlite3.Connection, run_id: str, stored: int) -> str | None:
+    """None when this run's book collection is healthy, else why not: no book stored at all
+    while some were requested, or fetch/parse failures on at least 1/BOOK_FAILURE_SHARE of the
+    requests. Thin, crossed or clock-skewed books are market refusals, not outages."""
+    rows = conn.execute(
+        "SELECT reason_code, COUNT(*) AS n FROM refusals WHERE run_id = ? AND stage = 'snapshot' "
+        "GROUP BY reason_code",
+        (run_id,),
+    ).fetchall()
+    attempted = stored + sum(row["n"] for row in rows)
+    failed = sum(row["n"] for row in rows if row["reason_code"] in ("FETCH_ERROR", "PARSE_ERROR"))
+    if attempted == 0:
+        return None
+    if stored == 0:
+        return "no book could be stored"
+    if failed * BOOK_FAILURE_SHARE >= attempted:
+        return f"{failed} of {attempted} book requests failed to fetch or parse"
+    return None
+
+
 def poll_resolutions(
     conn: sqlite3.Connection,
     client: JsonClient,

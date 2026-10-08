@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .cohorts import code_version
 from .collect import (
+    book_outage,
     discover,
     finish_run,
     poll_resolutions,
@@ -387,18 +388,27 @@ def _run_steps(
     if command in ("discover", "run-data"):
         summary = discover(conn, http, config, run_id, now_fn())
         print(f"seen {summary.markets_seen}, eligible {summary.eligible}")
+    outage: str | None = None
     if command == "snapshot":
         latest = _latest_discovery_run(settings.database_path)
         if latest is None:
             print("predict-agent: no completed discovery run yet", file=sys.stderr)
             return 2
         conn.execute("UPDATE runs SET source_run_id = ? WHERE run_id = ?", (latest, run_id))
-        print(f"snapshots {snapshot_eligible(conn, http, latest, run_id, now_fn)}")
+        stored = snapshot_eligible(conn, http, latest, run_id, now_fn)
+        print(f"snapshots {stored}")
+        outage = book_outage(conn, run_id, stored)
     if command == "run-data":
-        print(f"snapshots {snapshot_eligible(conn, http, run_id, run_id, now_fn)}")
+        stored = snapshot_eligible(conn, http, run_id, run_id, now_fn)
+        print(f"snapshots {stored}")
+        outage = book_outage(conn, run_id, stored)
+    if outage is not None:
+        print(f"predict-agent: books unavailable: {outage}", file=sys.stderr)
+        record_refusal(conn, run_id, None, command, "BOOKS_UNAVAILABLE", outage, now_fn())
     if command in ("resolve", "run-data"):
         print(f"resolution observations {poll_resolutions(conn, http, run_id, now_fn)}")
-    return 0
+    return 0 if outage is None else 4
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

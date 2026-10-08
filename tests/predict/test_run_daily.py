@@ -16,8 +16,9 @@ from unittest import mock
 from predict_agent.cli import main
 from predict_agent.db import connect
 from predict_agent.http import JsonClient
-from tests.predict.fakes import RoutedOpener
-from tests.predict.fixtures import CONDITION_ID, NOW
+from tests.predict.fakes import RoutedOpener, http_error
+from tests.predict.fixtures import CONDITION_ID, NOW, gamma_event, gamma_market, resolution_row
+from tests.predict.test_collect import events_routes
 from tests.predict.test_research_run import Clock, FakeRunner, outcome
 from tests.predict.trade_fixtures import seed_discovery, seed_tradeable_market
 
@@ -141,6 +142,47 @@ class RealResearchStepTests(unittest.TestCase):
             self.assertEqual(code, 6, out.getvalue())
             self.assertIn("research had operational failures: SDK_ERROR 2", out.getvalue())
             self.assertIn("failed: research (5)", out.getvalue())
+
+
+class BookOutageDailyTests(unittest.TestCase):
+    def test_a_book_outage_fails_the_data_run_and_skips_research(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            shutil.copy(REPO / "config" / "predict-policy.example.json",
+                        root / "config" / "predict-policy.json")
+            routes = events_routes({"politics": [gamma_event([gamma_market()])]},
+                                   [resolution_row()])
+            routes["/v2/resolutions"].append({"data": [resolution_row()]})
+            routes["/geoblock"] = [{"blocked": True, "country": "GB"}]
+            routes["/markets?"] = [[gamma_market()], []]
+            errors = [http_error(503) for _ in range(50)]
+            for error in errors:
+                self.addCleanup(error.close)  # unused ones would leak their temp file
+            routes["/book"] = list(errors)
+            client = JsonClient(opener=RoutedOpener(routes), sleep=lambda _: None,
+                                jitter=lambda: 0.0)
+            runner = FakeRunner()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = main(["run-daily"], root=root, client=client, runner=runner,
+                            now_fn=Clock(NOW))
+            self.assertEqual(code, 6, out.getvalue())
+            self.assertEqual(runner.requests, [])
+            self.assertIn("books unavailable:", out.getvalue())
+            self.assertIn("research (skipped)", out.getvalue())
+            conn = connect(root / "data" / "predict.sqlite3")
+            try:
+                self.assertGreater(conn.execute(
+                    "SELECT COUNT(*) FROM resolution_observations").fetchone()[0], 0)
+                self.assertEqual(conn.execute(
+                    "SELECT COUNT(*) FROM refusals WHERE reason_code = 'BOOKS_UNAVAILABLE'"
+                ).fetchone()[0], 1)
+                self.assertEqual(conn.execute(
+                    "SELECT status FROM runs WHERE command = 'run-data'").fetchone()[0],
+                    "FAILED")
+            finally:
+                conn.close()
 
 
 class ScriptTests(unittest.TestCase):
