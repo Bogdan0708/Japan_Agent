@@ -403,8 +403,12 @@ def resume_forecasts(
                     try:
                         attach_baseline(conn, forecast_id, pair[0], pair[1], now_fn())
                     except ForecastError as error:
-                        record_refusal(conn, run_id, None, "baseline", "BASELINE_REFUSED",
-                                       str(error), now_fn())
+                        condition_id = conn.execute(
+                            "SELECT condition_id FROM forecasts WHERE forecast_id = ?",
+                            (forecast_id,),
+                        ).fetchone()["condition_id"]
+                        record_refusal(conn, run_id, condition_id, "baseline",
+                                       "BASELINE_REFUSED", str(error), now_fn())
                     else:
                         summary.baselines += 1
                         summary.traded += trade_ready(conn, now_fn).traded

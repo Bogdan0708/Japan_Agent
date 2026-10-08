@@ -22,7 +22,7 @@ from predict_agent.cash import LedgerError
 from predict_agent.cli import main
 from predict_agent.cohorts import cohort_id_for, ensure_cohort
 from predict_agent.db import connect
-from predict_agent.forecasts import fail_attempt, start_attempt
+from predict_agent.forecasts import ForecastError, fail_attempt, start_attempt
 from predict_agent.http import JsonClient
 from predict_agent.invariants import verify_ledger
 from predict_agent.policy_params import parse_policy
@@ -624,6 +624,18 @@ class BaselineRecoveryTests(ResearchRunTestCase):
             "JOIN book_snapshots n ON n.id = b.no_snapshot_id").fetchone()
         self.assertEqual(tuple(row), (None, "YES", "NO"))
         self.assertEqual(verify_ledger(self.conn), [])
+
+    def test_a_refused_stored_pair_is_recorded_against_its_market(self) -> None:
+        self.crash_after_storing_books()
+        with mock.patch("predict_agent.research_run.attach_baseline",
+                        side_effect=ForecastError("snapshot 1 is for another market")):
+            resumed = self.run_day(FakeRunner(), book_queue=[],
+                                   start=NOW + timedelta(minutes=45))
+        self.assertEqual(resumed.no_timely_baseline, 1)
+        refusal = self.conn.execute(
+            "SELECT condition_id, detail FROM refusals WHERE reason_code = 'BASELINE_REFUSED'"
+        ).fetchone()
+        self.assertEqual(tuple(refusal), (CONDITION_ID, "snapshot 1 is for another market"))
 
     def test_earliest_in_window_pair_is_attached_and_late_books_are_ignored(self) -> None:
         self.crash_after_storing_books()

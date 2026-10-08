@@ -12,11 +12,13 @@ from typing import Any
 from .ledger_schema import LEDGER_SCHEMA
 from .util import canonical_json, isoformat, sha256_json
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Statements that bring an older version's existing tables up to date. CREATE ... IF NOT
-# EXISTS in SCHEMA and LEDGER_SCHEMA adds the new tables.
+# EXISTS in SCHEMA and LEDGER_SCHEMA adds the new tables and indexes (v4: per-market
+# lookup indexes only, so v3 needs no statements of its own).
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: ("ALTER TABLE resolution_observations ADD COLUMN resolution_requested_at TEXT",),
+    3: (),
 }
 GENESIS_HASH = "0" * 64
 
@@ -131,6 +133,9 @@ CREATE TRIGGER IF NOT EXISTS snapshots_no_update BEFORE UPDATE ON book_snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS snapshots_no_delete BEFORE DELETE ON book_snapshots
 BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;
+CREATE INDEX IF NOT EXISTS discoveries_by_market ON discoveries (condition_id);
+CREATE INDEX IF NOT EXISTS snapshots_by_market ON book_snapshots (condition_id);
+CREATE INDEX IF NOT EXISTS observations_by_market ON resolution_observations (condition_id);
 """
 
 

@@ -45,6 +45,7 @@ class TradeSummary:
     traded: int
     refused: dict[str, int]
     waiting: int  # entry forecasts not ready for a decision (no baseline yet)
+    skipped: int = 0  # portfolios a concurrent run decided first
 
 
 def _optional_decimal(text: str | None) -> Decimal | None:
@@ -243,6 +244,7 @@ def trade_ready(conn: sqlite3.Connection, now_fn: Callable[[], datetime]) -> Tra
     traded = 0
     refused: Counter[str] = Counter()
     waiting = 0
+    skipped = 0
     cohorts = [row["cohort_id"] for row in conn.execute("SELECT cohort_id FROM cohorts")]
     for cohort_id in cohorts:
         for forecast_id in unfinished_forecasts(conn, cohort_id):
@@ -252,9 +254,10 @@ def trade_ready(conn: sqlite3.Connection, now_fn: Callable[[], datetime]) -> Tra
             for portfolio_id in undecided_portfolios(conn, forecast_id):
                 result = decide_portfolio(conn, portfolio_id, forecast_id, now_fn)
                 if result.skipped:
+                    skipped += 1
                     continue
                 if result.ticket_id is not None:
                     traded += 1
                 else:
                     refused[result.reason or ""] += 1
-    return TradeSummary(traded, dict(refused), waiting)
+    return TradeSummary(traded, dict(refused), waiting, skipped)

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import ModuleType
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .config import blocked_host
 
@@ -125,11 +125,32 @@ def _fetchable(url: object, blocked: tuple[str, ...]) -> str | None:
         return f"{host} is on the blocked-domain list"
     if host in _LOCAL_NAMES or host.endswith(_LOCAL_SUFFIXES):
         return f"{host} is a local-network name"
-    lowered = url.lower()
+    text = _decoded(url).lower()
     for domain in blocked:
-        if domain in lowered or domain.replace(".", "-") in lowered:
+        if _mentions(text, domain):
             return f"url refers to blocked domain {domain}"
     return None
+
+
+def _decoded(url: str) -> str:
+    """`url` percent-decoded until it stops changing (bounded), so an escaped dot or a
+    double-encoded copy of a blocked name is still seen."""
+    for _ in range(4):
+        decoded = unquote(url)
+        if decoded == url:
+            break
+        url = decoded
+    return url
+
+
+def _mentions(text: str, domain: str) -> bool:
+    """True when `text` names `domain` as a whole name (not inside a longer word such as
+    `archive.php` for `archive.ph`), or in Google Translate's proxy form
+    (`polymarket-com.translate.goog`)."""
+    edge = r"(?<![a-z0-9-])"
+    plain = edge + re.escape(domain) + r"(?![a-z0-9-])"
+    proxied = edge + re.escape(domain.replace(".", "-")) + r"\.translate\.goog"
+    return re.search(plain, text) is not None or re.search(proxied, text) is not None
 
 
 def fetch_admitted(response: object) -> bool:

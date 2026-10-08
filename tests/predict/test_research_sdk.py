@@ -115,6 +115,14 @@ class HookTests(unittest.TestCase):
             "http://a.sslip.io/": False,
             "http://x.localtest.me/": False,
             "https://www.internal-medicine.org/": True,
+            # Blocked domains match whole names only, also after percent-decoding.
+            "https://www.example.gov/archive.php?id=1": True,
+            "https://news.example.com/kalshi-commission-ruling": True,
+            "https://blog.example.com/polymarket-community-notes": True,
+            "https://example.com/?u=polymarket%2Ecom": False,
+            "https://example.com/?u=polymarket%252Ecom": False,
+            "https://example.com/r?to=https%3A%2F%2Fkalshi.com%2Fm": False,
+            "https://www.notpolymarket.com/": True,
         }
         fake, outcome = run(Script(calls=[
             ToolCall("WebFetch", {"url": url, "prompt": "p"}, fetch_page(url)) for url in urls

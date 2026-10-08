@@ -132,6 +132,7 @@ def main(
             f"traded {trades.traded}; refused {refused}"
             + (f" ({reasons})" if reasons else "")
             + f"; waiting {trades.waiting}"
+            + (f"; skipped {trades.skipped} (decided by another run)" if trades.skipped else "")
         )
         return 0
     if args.command == "settle":
