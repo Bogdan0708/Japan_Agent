@@ -547,8 +547,9 @@ def run_updates(
 ) -> str | None:
     """Research every due update forecast, before the day's new entries so a backlog of
     new markets can never starve them (updates are few: one per open-ticket market per
-    week; none once a market is within `min_hours_to_close` of its end date). Updates spend the same daily budget (a refused one is recorded as
-    BUDGET at stage `update`) but not the entry volume; each takes a baseline for scoring and never
+    week; none once a market is within `min_hours_to_close` of its end date). Updates
+    spend the same daily budget (a refused one is recorded as BUDGET at
+    stage `update`) but not the entry volume; each takes a baseline for scoring and never
     trades. Returns the failure code that stopped the run, or None."""
     due = due_updates(conn, cohort_id, now_fn(), min_hours_to_close)
     for index, row in enumerate(due):
