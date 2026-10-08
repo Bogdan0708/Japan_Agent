@@ -86,6 +86,9 @@ ANY_FAILURE_STREAK = 3
 # Failed sessions, with no forecast and no update in the run, that make it operational.
 ALL_FAILED_THRESHOLD = 3
 MARKET_RESOLVED = "MARKET_RESOLVED"
+# A queued market that stopped being eligible (resolution started, or too close to its end
+# date) while earlier sessions ran: no attempt is opened.
+NO_LONGER_ELIGIBLE = "NO_LONGER_ELIGIBLE"
 # Weekly update forecasts (spec §5): a market is researched again once the cohort's newest
 # attempt there is this old.
 UPDATE_INTERVAL = timedelta(days=7)
@@ -157,6 +160,32 @@ def resolution_started(
     return False
 
 
+def entry_eligible(
+    conn: sqlite3.Connection, row: sqlite3.Row, now: datetime, min_hours_to_close: int
+) -> bool:
+    """A new entry may be researched at `now`: the market's resolution has not started and
+    it ends at least `min_hours_to_close` from now (no end date fails closed). The cutoff
+    bounds when a session may start: `run_research_day` rechecks it just before each paid
+    session, and a session that started in time is recorded even if it runs past the cutoff."""
+    if resolution_started(conn, row["condition_id"]):
+        return False
+    end_date = json.loads(row["rules_json"]).get("end_date")
+    return bool(end_date) and parse_datetime(end_date) >= now + timedelta(hours=min_hours_to_close)
+
+
+def update_eligible(
+    conn: sqlite3.Connection, row: sqlite3.Row, now: datetime, min_hours_to_close: int
+) -> bool:
+    """An update may be researched at `now`: the market's resolution has not started and
+    `now` is before its end date minus `min_hours_to_close` (no end date fails closed).
+    Like `entry_eligible`, it bounds when a session may start, not when it may finish."""
+    if resolution_started(conn, row["condition_id"]):
+        return False
+    end_date = json.loads(row["rules_json"]).get("end_date")
+    return bool(end_date) and now < parse_datetime(end_date) - timedelta(
+        hours=min_hours_to_close)
+
+
 def candidates(
     conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
 ) -> list[sqlite3.Row]:
@@ -180,15 +209,7 @@ def candidates(
         "ORDER BY d.condition_id",
         (run_id, cohort_id, cohort_id, INTERRUPTED, MAX_FAILED_ENTRY_ATTEMPTS),
     ).fetchall()
-    horizon = now + timedelta(hours=min_hours_to_close)
-    selected = []
-    for row in rows:
-        if resolution_started(conn, row["condition_id"]):
-            continue
-        end_date = json.loads(row["rules_json"]).get("end_date")
-        if end_date and parse_datetime(end_date) >= horizon:
-            selected.append(row)
-    return selected
+    return [row for row in rows if entry_eligible(conn, row, now, min_hours_to_close)]
 
 
 def due_updates(
@@ -212,12 +233,8 @@ def due_updates(
         (cohort_id,),
     ).fetchall()
     due: list[tuple[datetime, sqlite3.Row]] = []
-    horizon = timedelta(hours=min_hours_to_close)
     for row in rows:
-        if resolution_started(conn, row["condition_id"]):
-            continue
-        end_date = json.loads(row["rules_json"]).get("end_date")
-        if not end_date or now >= parse_datetime(end_date) - horizon:
+        if not update_eligible(conn, row, now, min_hours_to_close):
             continue
         started = [
             parse_datetime(a["started_at"])
@@ -579,6 +596,11 @@ def run_updates(
     trades. Returns the failure code that stopped the run, or None."""
     due = due_updates(conn, cohort_id, now_fn(), min_hours_to_close)
     for index, row in enumerate(due):
+        if not update_eligible(conn, row, now_fn(), min_hours_to_close):
+            record_refusal(conn, run_id, row["condition_id"], "update", NO_LONGER_ELIGIBLE,
+                           "the market left its update window while queued", now_fn())
+            summary.skipped[NO_LONGER_ELIGIBLE] += 1
+            continue
         usage = day_usage(conn, now_fn(), research.per_forecast_usd)
         if usage.spent_usd + research.per_forecast_usd > research.daily_usd:
             record_refusal(conn, run_id, row["condition_id"], "update", "BUDGET", "", now_fn())
@@ -659,6 +681,12 @@ def run_research_day(
             if aborted is not None:
                 _abort(conn, run_id, row["condition_id"], "research", aborted, summary,
                        now_fn)
+                continue
+            if not entry_eligible(conn, row, now_fn(), policy.min_hours_to_close):
+                record_refusal(conn, run_id, row["condition_id"], "research",
+                               NO_LONGER_ELIGIBLE,
+                               "the market left its entry window while queued", now_fn())
+                summary.skipped[NO_LONGER_ELIGIBLE] += 1
                 continue
             if stop is None:
                 stop = budget_refusal(

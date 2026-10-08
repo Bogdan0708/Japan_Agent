@@ -536,6 +536,57 @@ class BaselineOutageTests(ResearchRunTestCase):
         self.assertEqual(stages, ["research", "update"])
 
 
+class QueuedEligibilityTests(ResearchRunTestCase):
+    """Eligibility is rechecked right before each paid session (the cutoff bounds when
+    research may start; a session that started in time is recorded)."""
+
+    def run_with_clock(self, clock: Clock, book_queue: list[dict[str, Any]]) -> Any:
+        """Each session advances the clock two minutes."""
+        starts: list[datetime] = []
+
+        def runner(request: ResearchRequest) -> ResearchOutcome:
+            starts.append(clock.now)
+            clock.now += timedelta(minutes=2)
+            return outcome()
+
+        client = JsonClient(opener=RoutedOpener({"/book": book_queue}), sleep=lambda _: None,
+                            jitter=lambda: 0.0)
+        summary = run_research_day(self.conn, client, runner, policy=POLICY, research=RESEARCH,
+                                   config_hash="h", code_version="test", now_fn=clock)
+        return summary, starts
+
+    def test_a_queued_update_past_its_cutoff_is_not_started(self) -> None:
+        self.add_markets(OTHER[0])
+        self.run_day(FakeRunner(), book_queue=books() + books(OTHER[0]))
+        cutoff = NOW + timedelta(days=18)  # the market ends on day 20; entries need 48 h
+        clock = Clock(cutoff - timedelta(minutes=1))
+        seed_discovery(self.conn, self.markets, at=clock.now - timedelta(minutes=30))
+        summary, starts = self.run_with_clock(clock, books() + books(OTHER[0]))
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(summary.updates, 1)
+        self.assertEqual(dict(summary.skipped), {"NO_LONGER_ELIGIBLE": 1})
+        self.assertEqual(self.scalar(
+            "SELECT COUNT(*) FROM research_attempts WHERE kind = 'update'"), 1)
+        stage = self.scalar(
+            "SELECT stage FROM refusals WHERE reason_code = 'NO_LONGER_ELIGIBLE'")
+        self.assertEqual(stage, "update")
+
+    def test_a_queued_entry_past_its_horizon_is_not_started(self) -> None:
+        self.add_markets(OTHER[0])
+        horizon = NOW + timedelta(days=18)
+        clock = Clock(horizon - timedelta(minutes=1))
+        seed_discovery(self.conn, self.markets, at=clock.now - timedelta(minutes=30))
+        first = sorted(self.markets)[0]
+        summary, starts = self.run_with_clock(clock, books(first))
+        self.assertEqual(len(starts), 1)
+        self.assertEqual((summary.forecasts, dict(summary.skipped)),
+                         (1, {"NO_LONGER_ELIGIBLE": 1}))
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 1)
+        stage = self.scalar(
+            "SELECT stage FROM refusals WHERE reason_code = 'NO_LONGER_ELIGIBLE'")
+        self.assertEqual(stage, "research")
+
+
 class RetryLimitTests(ResearchRunTestCase):
     def failed_attempts(self, cohort: str, condition_id: str, *errors: str) -> None:
         for index, error in enumerate(errors):
