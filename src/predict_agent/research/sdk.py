@@ -350,7 +350,7 @@ async def _run(
     with tempfile.TemporaryDirectory(prefix="predict-research-") as cwd:
         options = build_options(sdk, request, session, cwd)
         client = sdk.ClaudeSDKClient(options=options)
-        session_expired = False
+        cleanup_expired = False
         try:
             try:
                 async with asyncio.timeout(timeout_seconds):
@@ -387,15 +387,16 @@ async def _run(
                                 else:
                                     error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
                                     detail = f"session ended with {message.subtype}"
-            except TimeoutError:
-                session_expired = True
-                raise
             finally:
                 # Always close (even after a failed or timed-out start; disconnecting is
                 # idempotent), outside the session deadline, before the working directory
                 # is removed.
-                async with asyncio.timeout(cleanup_seconds):
-                    await client.__aexit__(None, None, None)
+                try:
+                    async with asyncio.timeout(cleanup_seconds):
+                        await client.__aexit__(None, None, None)
+                except TimeoutError:
+                    cleanup_expired = True
+                    raise
             if error is None and not session.verified:
                 error, detail = "TOOLSET_MISMATCH", "the session sent no init report"
             elif error is None and session.hook_error:
@@ -405,9 +406,14 @@ async def _run(
         except TimeoutError:
             # Whatever the session reported is void: its real cost is unknown.
             structured, cost = None, None
-            limit = f"session exceeded {timeout_seconds}" if session_expired else (
-                f"closing the session exceeded {cleanup_seconds}")
-            error, detail = "TIMEOUT", f"{limit} seconds"
+            if cleanup_expired:
+                # The CLI child may still be running: the research run stops at once (the
+                # SDK's atexit reaper SIGTERMs any child left when the process exits).
+                error = "CLEANUP_TIMEOUT"
+                detail = (f"closing the session exceeded {cleanup_seconds} seconds; "
+                          "the CLI may still be running")
+            else:
+                error, detail = "TIMEOUT", f"session exceeded {timeout_seconds} seconds"
         except Exception as caught:  # noqa: BLE001 — any SDK failure fails this attempt
             error, detail = "SDK_ERROR", type(caught).__name__
     return ResearchOutcome(

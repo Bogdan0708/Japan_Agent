@@ -342,8 +342,9 @@ class SelfCheckTests(unittest.TestCase):
     def test_a_close_that_overruns_its_bound_fails_the_attempt_at_full_cost(self) -> None:
         fake = FakeSdk(Script(hang_on_exit=5))
         outcome = run_research(REQUEST, load=fake.module, cleanup_seconds=0.05)
-        self.assertEqual(outcome.error, "TIMEOUT")
-        self.assertEqual(outcome.detail, "closing the session exceeded 0.05 seconds")
+        self.assertEqual(outcome.error, "CLEANUP_TIMEOUT")
+        self.assertEqual(outcome.detail, "closing the session exceeded 0.05 seconds; "
+                                         "the CLI may still be running")
         self.assertIsNone(outcome.cost_usd)  # the reported 0.42 is void
         self.assertIsNone(outcome.structured_output)
 

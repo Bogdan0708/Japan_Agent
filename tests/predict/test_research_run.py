@@ -282,6 +282,20 @@ class SystemicFailureTests(ResearchRunTestCase):
             [(c, "ABORTED_TOOLSET_MISMATCH") for c in sorted(self.markets)[1:]],
         )
 
+    def test_a_cleanup_timeout_stops_the_run_and_is_charged_at_the_cap(self) -> None:
+        self.add_markets(*OTHER[:2])
+        bad = outcome(error="CLEANUP_TIMEOUT", cost_usd=None, structured_output=None,
+                      detail="closing the session exceeded 60.0 seconds; "
+                             "the CLI may still be running")
+        runner = FakeRunner(bad, bad, bad)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 1)
+        self.assertEqual(dict(summary.failed), {"CLEANUP_TIMEOUT": 1})
+        self.assertEqual(dict(summary.skipped), {"ABORTED_CLEANUP_TIMEOUT": 2})
+        self.assertEqual(summary.operational_failures(), {"CLEANUP_TIMEOUT": 1})
+        self.assertEqual(self.scalar(
+            "SELECT cost_usd FROM research_attempts"), str(RESEARCH.per_forecast_usd))
+
     def test_hook_error_stops_the_run(self) -> None:
         self.add_markets(*OTHER[:2])
         bad = outcome(error="HOOK_ERROR", cost_usd=None, structured_output=None)
@@ -516,7 +530,8 @@ class BaselineOutageTests(ResearchRunTestCase):
     def test_a_thin_book_is_not_an_outage(self) -> None:
         self.add_markets(OTHER[0])
         runner = FakeRunner()
-        summary = self.run_day(runner, book_queue=books(crossed=True) + books(OTHER[0]) + books(crossed=True) * 3)
+        queue = books(crossed=True) + books(OTHER[0]) + books(crossed=True) * 3
+        summary = self.run_day(runner, book_queue=queue)
         self.assertEqual(len(runner.requests), 2)
         self.assertEqual(dict(summary.failed), {})
         self.assertGreater(self.scalar(

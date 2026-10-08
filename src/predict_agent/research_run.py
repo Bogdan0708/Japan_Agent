@@ -71,7 +71,9 @@ MAX_FAILED_ENTRY_ATTEMPTS = 2
 MAX_DISCOVERY_AGE = timedelta(hours=24)
 # Failures of the setup rather than of one market: no point burning an attempt on every
 # remaining candidate (SDK_ERROR and TIMEOUT only when they repeat).
-SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
+# CLEANUP_TIMEOUT: closing the session overran its bound, so the CLI child may still be
+# running; spawning more sessions on top of it is not safe.
+SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR", "CLEANUP_TIMEOUT"})
 REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
 # Failures of the machinery rather than verdicts on one market: the run exits non-zero
 # (run-daily reports the research step as failed). Schema problems, budget/turn limits,
