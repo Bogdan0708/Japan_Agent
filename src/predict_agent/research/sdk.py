@@ -44,6 +44,14 @@ DENIED_TOOLS = (
     "MultiEdit", "NotebookEdit", "NotebookRead", "Read", "Skill", "SlashCommand", "Task",
     "TodoWrite", "Write",
 )
+# Wall-clock limit on one research session (live sessions took 1-2 minutes): startup,
+# query and response. A session that runs past it is stopped; its cost is unknown, so the
+# run charges the full per-forecast cap.
+SESSION_TIMEOUT_SECONDS = 900
+# Closing the session runs after (never under) the session deadline, with its own bound,
+# so a timeout cannot cut cleanup short. A close that overruns also fails the attempt.
+CLEANUP_TIMEOUT_SECONDS = 60
+
 _RESULT_ERRORS = {
     "error_max_budget_usd": "MAX_BUDGET",
     "error_max_turns": "MAX_TURNS",
@@ -329,7 +337,9 @@ def _cost(value: object) -> Decimal | None:
     return cost if cost.is_finite() and cost >= 0 else None
 
 
-async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
+async def _run(
+    sdk: ModuleType, request: ResearchRequest, timeout_seconds: float, cleanup_seconds: float
+) -> ResearchOutcome:
     session = _Session(request.blocked_domains)
     text: list[str] = []
     structured: Any = None
@@ -339,41 +349,65 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
     reported_model: str | None = None
     with tempfile.TemporaryDirectory(prefix="predict-research-") as cwd:
         options = build_options(sdk, request, session, cwd)
+        client = sdk.ClaudeSDKClient(options=options)
+        session_expired = False
         try:
-            async with sdk.ClaudeSDKClient(options=options) as client:
-                await client.query(request.user_prompt)
-                async for message in client.receive_response():
-                    if isinstance(message, sdk.SystemMessage) and message.subtype == "init":
-                        model = message.data.get("model")
-                        reported_model = model if isinstance(model, str) else None
-                        problem = toolset_problem(message.data)
-                        if problem is not None:
-                            error, detail = "TOOLSET_MISMATCH", problem
-                            break
-                        session.verified = True
-                    elif isinstance(message, sdk.AssistantMessage):
-                        text.extend(
-                            block.text for block in message.content
-                            if isinstance(block, sdk.TextBlock)
-                        )
-                    elif isinstance(message, sdk.ResultMessage):
-                        cost = _cost(message.total_cost_usd)
-                        # Only process result if we have verified the toolset
-                        if session.verified:
-                            if message.subtype == "success" and not message.is_error:
-                                structured = message.structured_output
-                                error, detail = (None, "") if structured is not None else (
-                                    "NO_RESULT", "the session returned no structured output"
-                                )
-                            else:
-                                error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
-                                detail = f"session ended with {message.subtype}"
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    await client.__aenter__()
+                    await client.query(request.user_prompt)
+                    async for message in client.receive_response():
+                        if (
+                            isinstance(message, sdk.SystemMessage)
+                            and message.subtype == "init"
+                        ):
+                            model = message.data.get("model")
+                            reported_model = model if isinstance(model, str) else None
+                            problem = toolset_problem(message.data)
+                            if problem is not None:
+                                error, detail = "TOOLSET_MISMATCH", problem
+                                break
+                            session.verified = True
+                        elif isinstance(message, sdk.AssistantMessage):
+                            text.extend(
+                                block.text for block in message.content
+                                if isinstance(block, sdk.TextBlock)
+                            )
+                        elif isinstance(message, sdk.ResultMessage):
+                            cost = _cost(message.total_cost_usd)
+                            # Only process result if we have verified the toolset
+                            if session.verified:
+                                if message.subtype == "success" and not message.is_error:
+                                    structured = message.structured_output
+                                    error, detail = (
+                                        (None, "") if structured is not None
+                                        else ("NO_RESULT",
+                                              "the session returned no structured output")
+                                    )
+                                else:
+                                    error = _RESULT_ERRORS.get(message.subtype, "SDK_ERROR")
+                                    detail = f"session ended with {message.subtype}"
+            except TimeoutError:
+                session_expired = True
+                raise
+            finally:
+                # Always close (even after a failed or timed-out start; disconnecting is
+                # idempotent), outside the session deadline, before the working directory
+                # is removed.
+                async with asyncio.timeout(cleanup_seconds):
+                    await client.__aexit__(None, None, None)
             if error is None and not session.verified:
                 error, detail = "TOOLSET_MISMATCH", "the session sent no init report"
             elif error is None and session.hook_error:
                 error, detail = "HOOK_ERROR", "a tool result could not be recorded"
             elif error is None and structured is None:
                 error, detail = "NO_RESULT", "the session ended without a result"
+        except TimeoutError:
+            # Whatever the session reported is void: its real cost is unknown.
+            structured, cost = None, None
+            limit = f"session exceeded {timeout_seconds}" if session_expired else (
+                f"closing the session exceeded {cleanup_seconds}")
+            error, detail = "TIMEOUT", f"{limit} seconds"
         except Exception as caught:  # noqa: BLE001 — any SDK failure fails this attempt
             error, detail = "SDK_ERROR", type(caught).__name__
     return ResearchOutcome(
@@ -389,8 +423,13 @@ async def _run(sdk: ModuleType, request: ResearchRequest) -> ResearchOutcome:
 
 
 def run_research(
-    request: ResearchRequest, *, load: Callable[[], ModuleType] = load_sdk
+    request: ResearchRequest,
+    *,
+    load: Callable[[], ModuleType] = load_sdk,
+    timeout_seconds: float = SESSION_TIMEOUT_SECONDS,
+    cleanup_seconds: float = CLEANUP_TIMEOUT_SECONDS,
 ) -> ResearchOutcome:
     """Run one forecast session. Raises ResearchUnavailable when the SDK is missing;
-    every other failure is returned as an outcome with an error code."""
-    return asyncio.run(_run(load(), request))
+    every other failure (including running past `timeout_seconds`, or closing taking
+    longer than `cleanup_seconds`) is returned as an outcome with an error code."""
+    return asyncio.run(_run(load(), request, timeout_seconds, cleanup_seconds))

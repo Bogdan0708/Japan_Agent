@@ -61,8 +61,9 @@ ResearchRunner = Callable[[ResearchRequest], ResearchOutcome]
 MAX_FAILED_ENTRY_ATTEMPTS = 2
 MAX_DISCOVERY_AGE = timedelta(hours=24)
 # Failures of the setup rather than of one market: no point burning an attempt on every
-# remaining candidate (SDK_ERROR only when it repeats).
+# remaining candidate (SDK_ERROR and TIMEOUT only when they repeat).
 SYSTEMIC_FAILURES = frozenset({"TOOLSET_MISMATCH", "HOOK_ERROR"})
+REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
 SDK_ERROR_STREAK = 2
 MARKET_RESOLVED = "MARKET_RESOLVED"
 # The init report's model field is recorded, never enforced: its exact name and value are
@@ -479,7 +480,7 @@ def run_research_day(
             if forecast_id is None:
                 code = failure or "UNKNOWN"
                 summary.failed[code] += 1
-                sdk_errors = sdk_errors + 1 if code == "SDK_ERROR" else 0
+                sdk_errors = sdk_errors + 1 if code in REPEATED_FAILURES else 0
                 if code in SYSTEMIC_FAILURES or sdk_errors >= SDK_ERROR_STREAK:
                     # Like BUDGET and VOLUME, every market left unresearched gets a
                     # durable refusal, not just a line in the summary.

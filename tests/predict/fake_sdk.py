@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import types
 from collections.abc import AsyncIterator
@@ -118,6 +119,9 @@ class Script:
     model: str | None = "claude-test"  # the init report's model field (None: absent)
     early_calls: list[ToolCall] = field(default_factory=list)
     send_result: bool = True
+    hang_seconds: float = 0.0  # a session that stalls before its result
+    hang_on_enter: float = 0.0  # startup (connect) stalls
+    hang_on_exit: float = 0.0  # closing (disconnect) stalls
 
 
 class FakeClient:
@@ -130,13 +134,17 @@ class FakeClient:
         self.cwd = self.options["cwd"]
 
     async def __aenter__(self) -> FakeClient:
+        if self.fake_sdk.script.hang_on_enter:
+            await asyncio.sleep(self.fake_sdk.script.hang_on_enter)
         self.fake_sdk.options = self.options
         self.fake_sdk.cwd_existed = os.path.isdir(self.cwd)
         self.fake_sdk.cwd_entries = os.listdir(self.cwd)
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
-        self.fake_sdk.closed = True
+        if self.fake_sdk.script.hang_on_exit:
+            await asyncio.sleep(self.fake_sdk.script.hang_on_exit)
+        self.fake_sdk.closed = True  # only once closing has completed
         self.fake_sdk.cwd_existed_at_close = os.path.isdir(self.cwd)
         return False
 
@@ -186,6 +194,8 @@ class FakeClient:
             self.fake_sdk.executed.append(ToolCall(call.tool, tool_input, call.response))
             await self._post(hooks, call, tool_input)
         yield AssistantMessage([TextBlock(script.text)])
+        if script.hang_seconds:
+            await asyncio.sleep(script.hang_seconds)
         if script.send_result:
             yield script.result
 

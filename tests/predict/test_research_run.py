@@ -299,6 +299,17 @@ class SystemicFailureTests(ResearchRunTestCase):
         self.assertEqual(dict(summary.skipped), {"ABORTED_SDK_ERROR": 2})
         self.assertEqual(dict(summary.failed), {"SDK_ERROR": 2})
 
+    def test_two_consecutive_timeouts_stop_the_run(self) -> None:
+        self.add_markets(*OTHER[:3])
+        slow = outcome(error="TIMEOUT", cost_usd=None, structured_output=None)
+        runner = FakeRunner(slow, slow, slow, slow)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 2)
+        self.assertEqual(dict(summary.skipped), {"ABORTED_TIMEOUT": 2})
+        costs = [r[0] for r in self.conn.execute("SELECT cost_usd FROM research_attempts")]
+        self.assertEqual(costs, [str(RESEARCH.per_forecast_usd)] * 2)  # unknown: full cap
+        self.assertEqual(dict(summary.failed), {"TIMEOUT": 2})
+
     def test_a_single_sdk_error_between_successes_does_not_stop_the_run(self) -> None:
         self.add_markets(*OTHER[:2])
         bad = outcome(error="SDK_ERROR", cost_usd=None, structured_output=None)

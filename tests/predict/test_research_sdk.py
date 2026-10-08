@@ -9,8 +9,10 @@ from unittest import mock
 from predict_agent.research.schema import OUTPUT_SCHEMA, OutputError, parse_output
 from predict_agent.research.sdk import (
     ALLOWED_TOOLS,
+    CLEANUP_TIMEOUT_SECONDS,
     DENIED_TOOLS,
     EXPECTED_SESSION_TOOLS,
+    SESSION_TIMEOUT_SECONDS,
     STRUCTURED_OUTPUT_TOOL,
     ResearchRequest,
     ResearchUnavailable,
@@ -313,6 +315,40 @@ class SelfCheckTests(unittest.TestCase):
         self.assertTrue(fake.closed)
         self.assertTrue(fake.cwd_existed_at_close)
         self.assertIsNone(outcome.error)  # type: ignore[attr-defined]
+
+    def test_a_session_stalling_at_startup_or_mid_research_is_stopped_and_closed(self) -> None:
+        for label, script in {"startup": Script(hang_on_enter=5),
+                              "research": Script(hang_seconds=5)}.items():
+            with self.subTest(label):
+                fake = FakeSdk(script)
+                outcome = run_research(REQUEST, load=fake.module, timeout_seconds=0.05)
+                self.assertEqual(outcome.error, "TIMEOUT")
+                self.assertEqual(outcome.detail, "session exceeded 0.05 seconds")
+                self.assertIsNone(outcome.cost_usd)  # unknown: the run charges the full cap
+                self.assertIsNone(outcome.structured_output)
+                self.assertTrue(fake.closed)  # closing ran to completion
+                self.assertTrue(fake.cwd_existed_at_close)
+
+    def test_closing_runs_outside_the_session_deadline(self) -> None:
+        # The session finishes at once; closing takes longer than the session limit but
+        # stays within its own bound, so nothing is cut short.
+        fake = FakeSdk(Script(hang_on_exit=0.2))
+        outcome = run_research(REQUEST, load=fake.module, timeout_seconds=0.1)
+        self.assertIsNone(outcome.error)
+        self.assertEqual(outcome.cost_usd, Decimal("0.42"))
+        self.assertTrue(fake.closed)
+        self.assertTrue(fake.cwd_existed_at_close)
+
+    def test_a_close_that_overruns_its_bound_fails_the_attempt_at_full_cost(self) -> None:
+        fake = FakeSdk(Script(hang_on_exit=5))
+        outcome = run_research(REQUEST, load=fake.module, cleanup_seconds=0.05)
+        self.assertEqual(outcome.error, "TIMEOUT")
+        self.assertEqual(outcome.detail, "closing the session exceeded 0.05 seconds")
+        self.assertIsNone(outcome.cost_usd)  # the reported 0.42 is void
+        self.assertIsNone(outcome.structured_output)
+
+    def test_the_default_limits(self) -> None:
+        self.assertEqual((SESSION_TIMEOUT_SECONDS, CLEANUP_TIMEOUT_SECONDS), (900, 60))
 
     def test_verified_session_without_a_result_fails_closed(self) -> None:
         fake, outcome = run(Script(send_result=False))
