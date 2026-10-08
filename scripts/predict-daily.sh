@@ -19,7 +19,13 @@ LOG="$LOG_DIR/predict-daily-$STAMP.log"
 
 cd "$ROOT"
 export PYTHONPATH="$ROOT/src"
+export PYTHONUNBUFFERED=1
 PYTHON="${PREDICT_PYTHON:-python3}"
+
+if ! command -v flock >/dev/null 2>&1 || ! command -v timeout >/dev/null 2>&1; then
+  echo "predict-daily needs flock and timeout (util-linux, coreutils)" >>"$LOG"
+  exit 1
+fi
 
 # One cycle at a time: cron and a manual invocation must never interleave.
 exec 9>"$ROOT/data/.predict-daily.lock"

@@ -504,7 +504,8 @@ def render_performance(data: dict[str, Any]) -> str:
                               {"flagged": f["exposure_flagged_scores"]})
         lines += ["### Paper portfolios", "",
                   "| Portfolio | Equity | Cash | Locked | Open | Settled | Realized P&L | "
-                  "Net of research | 95% CI by event (heuristic) | Hit rate | Edge at entry | "
+                  "Net of research (full cohort cost) | 95% CI by event (heuristic) | Hit rate | "
+                  "Edge at entry | "
                   "Realized edge |",
                   "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|"]
         for p in cohort["portfolios"]:
@@ -517,7 +518,8 @@ def render_performance(data: dict[str, Any]) -> str:
                 f"{p['realized_pnl_net_of_research']} | {interval} | {p['hit_rate'] or '—'} | "
                 f"{p['mean_edge_at_entry'] or '—'} | {p['mean_realized_edge'] or '—'} |"
             )
-        lines += [""]
+        lines += ["", "The whole cohort's research cost (entries and updates) is subtracted from "
+                      "each portfolio's net.", ""]
         for p in cohort["portfolios"]:
             lines.append(f"Decisions ({p['variant']}): {json.dumps(p['decisions'])}  ")
         u = cohort["updates"]

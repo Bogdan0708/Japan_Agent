@@ -148,7 +148,7 @@ class ScriptTests(unittest.TestCase):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
         text = SCRIPT.read_text(encoding="utf-8")
         for needle in ("set -euo pipefail", "flock -n 9", "timeout ",
-                       "predict_agent.cli run-daily"):
+                       "predict_agent.cli run-daily", "PYTHONUNBUFFERED", "command -v flock"):
             self.assertIn(needle, text)
         self.assertTrue(os.access(SCRIPT, os.X_OK))
 

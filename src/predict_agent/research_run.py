@@ -76,6 +76,11 @@ REPEATED_FAILURES = frozenset({"SDK_ERROR", "TIMEOUT"})
 # outcomes, like BUDGET and VOLUME refusals.
 OPERATIONAL_FAILURES = SYSTEMIC_FAILURES | REPEATED_FAILURES | {"NO_RESULT", "RECORD_FAILED"}
 SDK_ERROR_STREAK = 2
+# Consecutive failed sessions of any code (no success in between) that stop the run: a
+# systemic problem disguised as per-market codes (e.g. a schema the model cannot meet).
+ANY_FAILURE_STREAK = 3
+# Failed sessions, with no forecast and no update in the run, that make it operational.
+ALL_FAILED_THRESHOLD = 3
 MARKET_RESOLVED = "MARKET_RESOLVED"
 # Weekly update forecasts (spec §5): a market is researched again once the cohort's newest
 # attempt there is this old.
@@ -103,8 +108,12 @@ class ResearchSummary:
         anything unrecognised counts too, failing toward attention."""
         known = OPERATIONAL_FAILURES | {"SCHEMA_INVALID", "UNFETCHED_CITATION", "MAX_BUDGET",
                                         "MAX_TURNS", MARKET_RESOLVED}
-        return {code: n for code, n in sorted(self.failed.items())
-                if code in OPERATIONAL_FAILURES or code not in known}
+        broken = {code: n for code, n in sorted(self.failed.items())
+                  if code in OPERATIONAL_FAILURES or code not in known}
+        total = sum(self.failed.values())
+        if total >= ALL_FAILED_THRESHOLD and self.forecasts == 0 and self.updates == 0:
+            broken["ALL_SESSIONS_FAILED"] = total
+        return broken
 
 
 def cohort_identity(
@@ -178,11 +187,16 @@ def candidates(
     return selected
 
 
-def due_updates(conn: sqlite3.Connection, cohort_id: str, now: datetime) -> list[sqlite3.Row]:
+def due_updates(
+    conn: sqlite3.Connection, cohort_id: str, now: datetime, min_hours_to_close: int
+) -> list[sqlite3.Row]:
     """Markets due a weekly update forecast for this cohort: it holds an OPEN ticket there
-    in any portfolio, the market's resolution has not started, and the cohort's newest
-    research attempt on it (entry or update, whatever its outcome) started at least
-    UPDATE_INTERVAL ago. Oldest first. Rows carry the market's current rules version."""
+    in any portfolio, the market's resolution has not started, it is still more than
+    `min_hours_to_close` from its end date (the horizon entries use: after it a session
+    could look up the outcome; a current rules version with no end date fails closed and
+    is skipped), and the cohort's newest research attempt on it (entry or update, whatever
+    its outcome) started at least UPDATE_INTERVAL ago. Oldest first. Rows carry the
+    market's current rules version."""
     rows = conn.execute(
         "SELECT m.condition_id, m.current_rules_hash AS rules_hash, r.rules_json "
         "FROM markets m JOIN rules_versions r ON r.condition_id = m.condition_id "
@@ -194,8 +208,12 @@ def due_updates(conn: sqlite3.Connection, cohort_id: str, now: datetime) -> list
         (cohort_id,),
     ).fetchall()
     due: list[tuple[datetime, sqlite3.Row]] = []
+    horizon = timedelta(hours=min_hours_to_close)
     for row in rows:
         if resolution_started(conn, row["condition_id"]):
+            continue
+        end_date = json.loads(row["rules_json"]).get("end_date")
+        if not end_date or now >= parse_datetime(end_date) - horizon:
             continue
         started = [
             parse_datetime(a["started_at"])
@@ -479,18 +497,24 @@ def resume_forecasts(
 
 @dataclass
 class FailureStreak:
-    """Consecutive SDK errors/timeouts across the whole run (updates and entries alike)."""
+    """Consecutive failures across the whole run (updates and entries alike): SDK
+    errors/timeouts, and failures of any code."""
 
     count: int = 0
+    any_count: int = 0
 
     def failed(self, code: str) -> bool:
-        """Count one failure; True when it should stop the run (a systemic failure, or
-        the SDK_ERROR_STREAK-th repeated failure in a row)."""
+        """Count one failure; True when it should stop the run (a systemic failure, the
+        SDK_ERROR_STREAK-th repeated SDK error/timeout in a row, or the
+        ANY_FAILURE_STREAK-th failed session of any code in a row)."""
         self.count = self.count + 1 if code in REPEATED_FAILURES else 0
-        return code in SYSTEMIC_FAILURES or self.count >= SDK_ERROR_STREAK
+        self.any_count += 1
+        return (code in SYSTEMIC_FAILURES or self.count >= SDK_ERROR_STREAK
+                or self.any_count >= ANY_FAILURE_STREAK)
 
     def succeeded(self) -> None:
         self.count = 0
+        self.any_count = 0
 
 
 def _abort(
@@ -519,13 +543,14 @@ def run_updates(
     summary: ResearchSummary,
     streak: FailureStreak,
     now_fn: Callable[[], datetime],
+    min_hours_to_close: int,
 ) -> str | None:
     """Research every due update forecast, before the day's new entries so a backlog of
     new markets can never starve them (updates are few: one per open-ticket market per
-    week). Updates spend the same daily budget (a refused one is recorded as BUDGET at
-    stage `update`) but not the entry volume; each takes a baseline for scoring and never
+    week; none once a market is within `min_hours_to_close` of its end date). Updates spend the same daily budget (a refused one is recorded as
+    BUDGET at stage `update`) but not the entry volume; each takes a baseline for scoring and never
     trades. Returns the failure code that stopped the run, or None."""
-    due = due_updates(conn, cohort_id, now_fn())
+    due = due_updates(conn, cohort_id, now_fn(), min_hours_to_close)
     for index, row in enumerate(due):
         usage = day_usage(conn, now_fn(), research.per_forecast_usd)
         if usage.spent_usd + research.per_forecast_usd > research.daily_usd:
@@ -588,15 +613,15 @@ def run_research_day(
         stop: str | None = None
         pending = candidates(conn, cohort_id, now_fn(), policy.min_hours_to_close)
         aborted: str | None = None
+        streak = FailureStreak()
         if _discovery_is_stale(conn, now_fn()):
             record_refusal(conn, run_id, None, "research", "STALE_DISCOVERY",
                            "the latest discovery run is older than 24 hours", now_fn())
             summary.skipped["STALE_DISCOVERY"] = 1
             pending = []
         else:
-            streak = FailureStreak()
             aborted = run_updates(conn, client, runner, cohort_id, research, run_id, summary,
-                                  streak, now_fn)
+                                  streak, now_fn, policy.min_hours_to_close)
         for row in pending:
             if aborted is not None:
                 _abort(conn, run_id, row["condition_id"], "research", aborted, summary,

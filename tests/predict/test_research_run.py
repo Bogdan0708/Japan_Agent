@@ -319,6 +319,27 @@ class SystemicFailureTests(ResearchRunTestCase):
         self.assertEqual(dict(summary.skipped), {})
 
 
+class AnyFailureStreakTests(ResearchRunTestCase):
+    def test_three_schema_invalid_in_a_row_stop_the_run(self) -> None:
+        self.add_markets(*OTHER)
+        bad = outcome(structured_output=forecast_output(base_rate="5-10%"))
+        runner = FakeRunner(bad, bad, bad, bad)
+        summary = self.run_day(runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 3)
+        self.assertEqual(dict(summary.failed), {"SCHEMA_INVALID": 3})
+        self.assertEqual(dict(summary.skipped), {"ABORTED_SCHEMA_INVALID": 1})
+        self.assertEqual(summary.operational_failures(), {"ALL_SESSIONS_FAILED": 3})
+
+    def test_a_success_in_between_resets_the_streak(self) -> None:
+        self.add_markets(*OTHER)
+        bad = outcome(structured_output=forecast_output(base_rate="5-10%"))
+        runner = FakeRunner(bad, outcome(), bad, bad)
+        summary = self.run_day(runner, book_queue=books(sorted(self.markets)[1]))
+        self.assertEqual(len(runner.requests), 4)
+        self.assertEqual(dict(summary.skipped), {})
+        self.assertEqual(summary.operational_failures(), {})
+
+
 class UpdateForecastTests(ResearchRunTestCase):
     """Weekly update forecasts (spec §5): markets where the active cohort holds an open
     ticket, researched again once its newest attempt there is a week old; they take a
@@ -372,6 +393,27 @@ class UpdateForecastTests(ResearchRunTestCase):
             p_low="0.30", p_mid="0.35", p_high="0.40"))
         self.entry_day(FakeRunner(no_edge))
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM paper_tickets"), 0)
+        self.assertEqual(self.later(8).updates, 0)
+
+    def test_no_update_within_min_hours_to_close_of_the_end_date(self) -> None:
+        # The market ends 20 days after NOW; entries need 48 h, so updates stop at day 18.
+        self.entry_day()
+        self.assertEqual(self.later(18.5).updates, 0)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM research_attempts"), 1)
+
+    def test_a_market_far_from_its_end_is_still_updated(self) -> None:
+        self.entry_day()
+        self.assertEqual(self.later(17.5).updates, 1)
+
+    def test_a_market_without_an_end_date_is_not_updated(self) -> None:
+        self.entry_day()
+        # A rules change that dropped the end date: the market's current version has none.
+        rules = json.loads(self.scalar("SELECT rules_json FROM rules_versions"))
+        rules.pop("end_date")
+        self.conn.execute(
+            "INSERT INTO rules_versions (condition_id, rules_hash, rules_json, first_seen_at) "
+            "VALUES (?, 'noend', ?, ?)", (CONDITION_ID, json.dumps(rules), NOW.isoformat()))
+        self.conn.execute("UPDATE markets SET current_rules_hash = 'noend'")
         self.assertEqual(self.later(8).updates, 0)
 
     def test_no_update_once_resolution_has_started(self) -> None:
@@ -829,6 +871,13 @@ class CliTests(ResearchRunTestCase):
         odd = outcome(error="SOMETHING_NEW", cost_usd=None, structured_output=None)
         code, output = self.cli(FakeRunner(odd), [])
         self.assertEqual(code, 5, output)
+
+    def test_all_sessions_failing_with_a_per_market_code_exits_5(self) -> None:
+        self.add_markets(*OTHER)
+        bad = outcome(structured_output=forecast_output(base_rate="5-10%"))
+        code, output = self.cli(FakeRunner(bad, bad, bad, bad), [])
+        self.assertEqual(code, 5, output)
+        self.assertIn("ALL_SESSIONS_FAILED 3", output)
 
     def test_a_second_research_run_is_refused_while_the_lock_is_held(self) -> None:
         lock_path = self.root / "data" / "predict.sqlite3.research.lock"
