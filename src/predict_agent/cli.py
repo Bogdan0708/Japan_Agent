@@ -25,6 +25,7 @@ from .gamma import ParseError
 from .http import FetchError, JsonClient
 from .invariants import verify_ledger
 from .paper import trade_ready
+from .performance import performance, render_performance
 from .policy_params import load_policy_config
 from .report import render_markdown, shortlist
 from .research.config import load_research_config
@@ -46,10 +47,12 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("settle", help="settle open paper tickets from stored resolutions (offline)")
     sub.add_parser("trade", help="decide forecasts with timely baselines; paper only (offline)")
     sub.add_parser("research", help="forecast eligible markets with Claude (no prices), then trade")
-    report = sub.add_parser("report", help="write the shortlist report")
+    report = sub.add_parser("report", help="write the shortlist or performance report")
     which = report.add_mutually_exclusive_group(required=True)
     which.add_argument("--run")
     which.add_argument("--latest", action="store_true")
+    which.add_argument("--performance", action="store_true",
+                       help="forecast scores and paper P&L per cohort (offline)")
     sub.add_parser("run-data", help="geoblock, discover, snapshot, resolve, report")
     return parser
 
@@ -76,6 +79,23 @@ def _write_report(settings: Settings, conn_path: Path, run_id: str) -> Path:
     markdown = settings.reports_dir / f"shortlist-{run_id}.md"
     markdown.write_text(render_markdown(data), encoding="utf-8")
     (settings.reports_dir / f"shortlist-{run_id}.json").write_text(
+        json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return markdown
+
+
+def _write_performance(settings: Settings, now: datetime) -> Path:
+    """Write performance-<UTC stamp>.md and .json; offline and read-only on the ledger."""
+    conn = connect(settings.database_path)
+    try:
+        data = performance(conn, now)
+    finally:
+        conn.close()
+    settings.reports_dir.mkdir(parents=True, exist_ok=True)
+    stem = settings.reports_dir / f"performance-{now.strftime('%Y%m%dT%H%M%SZ')}"
+    markdown = stem.with_suffix(".md")
+    markdown.write_text(render_performance(data), encoding="utf-8")
+    stem.with_suffix(".json").write_text(
         json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
     )
     return markdown
@@ -147,6 +167,9 @@ def main(
             age = item.age(now)
             since = "never resolved" if age is None else f"resolved {age} ago"
             print(f"pending ticket {item.ticket_id} {item.condition_id}: {item.reason} ({since})")
+        return 0
+    if args.command == "report" and args.performance:
+        print(_write_performance(settings, now_fn()))
         return 0
     http = client or JsonClient()
     if args.command == "research":
