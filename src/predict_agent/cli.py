@@ -240,7 +240,7 @@ def _research_line(summary: ResearchSummary) -> str:
         f"forecasts {summary.forecasts} (abstained {summary.abstentions}); "
         f"failed: {counts(summary.failed)}; skipped: {counts(summary.skipped)}; "
         f"baselines {summary.baselines}; no timely baseline {summary.no_timely_baseline}; "
-        f"traded {summary.traded}"
+        f"traded {summary.traded}; updates {summary.updates}"
     )
 
 

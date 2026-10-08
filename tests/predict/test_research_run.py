@@ -319,6 +319,131 @@ class SystemicFailureTests(ResearchRunTestCase):
         self.assertEqual(dict(summary.skipped), {})
 
 
+class UpdateForecastTests(ResearchRunTestCase):
+    """Weekly update forecasts (spec §5): markets where the active cohort holds an open
+    ticket, researched again once its newest attempt there is a week old; they take a
+    baseline for scoring and never trade."""
+
+    def entry_day(self, runner: FakeRunner | None = None) -> None:
+        summary = self.run_day(runner or FakeRunner())
+        self.assertEqual(summary.forecasts, 1)
+
+    def later(self, days: float, runner: FakeRunner | None = None, **kwargs: Any) -> Any:
+        start = NOW + timedelta(days=days)
+        seed_discovery(self.conn, self.markets, at=start - timedelta(hours=1))
+        return self.run_day(runner or FakeRunner(), start=start, **kwargs)
+
+    def test_a_market_with_an_open_ticket_is_updated_after_a_week(self) -> None:
+        self.entry_day()
+        tickets = self.scalar("SELECT COUNT(*) FROM paper_tickets")
+        summary = self.later(8)
+        self.assertEqual((summary.forecasts, summary.updates), (0, 1))
+        kinds = [r[0] for r in self.conn.execute(
+            "SELECT kind FROM forecasts ORDER BY forecast_id")]
+        self.assertEqual(kinds, ["entry", "update"])
+        self.assertEqual(self.scalar(
+            "SELECT kind FROM research_attempts ORDER BY attempt_id DESC LIMIT 1"), "update")
+        update = self.scalar("SELECT MAX(forecast_id) FROM forecasts")
+        baseline = self.conn.execute(
+            "SELECT yes_snapshot_id, reason FROM forecast_baselines WHERE forecast_id = ?",
+            (update,)).fetchone()
+        self.assertIsNotNone(baseline["yes_snapshot_id"])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM paper_tickets"), tickets)
+        self.assertEqual(self.scalar(
+            f"SELECT COUNT(*) FROM decisions WHERE forecast_id = {update}"), 0)
+        self.assertEqual(verify_ledger(self.conn), [])
+
+    def test_no_update_within_a_week_of_the_last_attempt(self) -> None:
+        self.entry_day()
+        self.assertEqual(self.later(6).updates, 0)
+        self.assertEqual(self.later(13).updates, 0 + 1)  # a week after the entry attempt
+        self.assertEqual(self.later(14).updates, 0)  # the update attempt itself resets it
+
+    def test_a_failed_update_waits_a_week_before_the_next_try(self) -> None:
+        self.entry_day()
+        bad = outcome(structured_output=forecast_output(base_rate="5-10%"))
+        summary = self.later(8, FakeRunner(bad))
+        self.assertEqual((summary.updates, dict(summary.failed)), (0, {"SCHEMA_INVALID": 1}))
+        self.assertEqual(self.later(9).updates, 0)
+        self.assertEqual(self.later(16).updates, 1)
+
+    def test_no_update_without_an_open_ticket(self) -> None:
+        no_edge = outcome(structured_output=forecast_output(
+            p_low="0.30", p_mid="0.35", p_high="0.40"))
+        self.entry_day(FakeRunner(no_edge))
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM paper_tickets"), 0)
+        self.assertEqual(self.later(8).updates, 0)
+
+    def test_no_update_once_resolution_has_started(self) -> None:
+        self.entry_day()
+        seed_observation(self.conn, None, status="proposed", fetched_at=NOW + timedelta(days=7))
+        self.assertEqual(self.later(8).updates, 0)
+
+    def test_updates_count_toward_the_budget_but_not_the_entry_volume(self) -> None:
+        self.entry_day()
+        self.add_markets(OTHER[0])
+        one_entry = replace(RESEARCH, max_entry_forecasts_per_day=1)
+        summary = self.later(8, research=one_entry,
+                             book_queue=books() + books(OTHER[0]))
+        self.assertEqual((summary.forecasts, summary.updates), (1, 1))
+        tight = replace(RESEARCH, daily_usd=RESEARCH.per_forecast_usd / 2)
+        summary = self.later(16, research=tight)
+        self.assertEqual(summary.updates, 0)
+        self.assertEqual(summary.skipped["UPDATE_BUDGET"], 2)
+        refusals = [r[0] for r in self.conn.execute(
+            "SELECT stage FROM refusals WHERE reason_code = 'BUDGET'")]
+        self.assertEqual(refusals, ["update", "update"])
+
+    def test_due_updates_come_before_a_backlog_of_new_entries(self) -> None:
+        self.entry_day()
+        self.add_markets(*OTHER)  # a backlog of three new markets
+        one_session = replace(RESEARCH, daily_usd=RESEARCH.per_forecast_usd)
+        summary = self.later(8, research=one_session)
+        self.assertEqual((summary.updates, summary.forecasts), (1, 0))
+        self.assertEqual(summary.skipped["BUDGET"], 3)
+        summary = self.later(9, research=one_session, book_queue=books(OTHER[0]))
+        self.assertEqual((summary.updates, summary.forecasts), (0, 1))  # not due again yet
+
+    def test_stale_discovery_stops_updates_too(self) -> None:
+        self.entry_day()
+        summary = self.run_day(FakeRunner(), start=NOW + timedelta(days=8))
+        self.assertEqual(summary.updates, 0)
+        self.assertEqual(summary.skipped["STALE_DISCOVERY"], 1)
+
+    def test_a_systemic_failure_in_an_update_stops_the_entries(self) -> None:
+        self.entry_day()
+        self.add_markets(*OTHER[:2])
+        broken = outcome(error="TOOLSET_MISMATCH", cost_usd=None, structured_output=None)
+        runner = FakeRunner(broken)
+        summary = self.later(8, runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 1)  # the update only; no entry is attempted
+        self.assertEqual(dict(summary.failed), {"TOOLSET_MISMATCH": 1})
+        self.assertEqual(summary.skipped["ABORTED_TOOLSET_MISMATCH"], 2)
+
+    def test_the_failure_streak_carries_from_updates_into_entries(self) -> None:
+        self.entry_day()
+        self.add_markets(*OTHER[:3])
+        slow = outcome(error="TIMEOUT", cost_usd=None, structured_output=None)
+        runner = FakeRunner(slow, slow, slow, slow)
+        summary = self.later(8, runner, book_queue=[])
+        self.assertEqual(len(runner.requests), 2)  # the update, then one entry
+        self.assertEqual(dict(summary.failed), {"TIMEOUT": 2})
+        self.assertEqual(summary.skipped["ABORTED_TIMEOUT"], 2)
+        charged = [r[0] for r in self.conn.execute(
+            "SELECT cost_usd FROM research_attempts WHERE status = 'FAILED'")]
+        self.assertEqual(charged, [str(RESEARCH.per_forecast_usd)] * 2)
+
+    def test_updates_left_after_an_abort_are_recorded(self) -> None:
+        self.add_markets(OTHER[0])
+        self.run_day(FakeRunner(), book_queue=books() + books(OTHER[0]))
+        self.assertEqual(self.scalar("SELECT COUNT(DISTINCT condition_id) FROM paper_tickets"), 2)
+        broken = outcome(error="HOOK_ERROR", cost_usd=None, structured_output=None)
+        summary = self.later(8, FakeRunner(broken), book_queue=[])
+        self.assertEqual(summary.skipped["ABORTED_HOOK_ERROR"], 1)
+        stages = [r[0] for r in self.conn.execute(
+            "SELECT stage FROM refusals WHERE reason_code = 'ABORTED_HOOK_ERROR'")]
+        self.assertEqual(stages, ["update"])
+
 class RetryLimitTests(ResearchRunTestCase):
     def failed_attempts(self, cohort: str, condition_id: str, *errors: str) -> None:
         for index, error in enumerate(errors):
@@ -685,7 +810,7 @@ class CliTests(ResearchRunTestCase):
         code, output = self.cli(FakeRunner(), books())
         self.assertEqual(code, 0, output)
         self.assertIn("forecasts 1 (abstained 0)", output)
-        self.assertIn("traded 2", output)
+        self.assertIn("traded 2; updates 0", output)
 
     def test_a_second_research_run_is_refused_while_the_lock_is_held(self) -> None:
         lock_path = self.root / "data" / "predict.sqlite3.research.lock"
